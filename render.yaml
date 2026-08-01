@@ -2,6 +2,7 @@ services:
   - type: web
     name: cura-backend
     env: python
+    plan: free
     buildCommand: "./build.sh"
     startCommand: "gunicorn config.wsgi:application"
     envVars:

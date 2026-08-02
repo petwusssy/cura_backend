@@ -24,6 +24,9 @@ class Patient(models.Model):
     position = models.CharField(max_length=100, blank=True, null=True)
     department = models.CharField(max_length=100, blank=True, null=True)
     address = models.TextField(blank=True, null=True)
+    studentCategory = models.CharField(max_length=50, blank=True, null=True)
+    guardianName = models.CharField(max_length=255, blank=True, null=True)
+    gradeLevel = models.CharField(max_length=50, blank=True, null=True)
 
     def __str__(self):
         return self.name
@@ -52,8 +55,13 @@ class Consultation(models.Model):
     recommendations = models.TextField(blank=True, null=True)
     followUp = models.CharField(max_length=255, blank=True, null=True)
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Consultation')
-    prescriptionImage = models.URLField(blank=True, null=True)
+    prescriptionImage = models.TextField(blank=True, null=True)
     transferred = models.BooleanField(default=False)
+    dismissalDestination = models.CharField(max_length=50, blank=True, null=True)
+    fetcherIdImage = models.TextField(blank=True, null=True)
+    purposeOfVisit = models.CharField(max_length=255, blank=True, null=True)
+    operationalNotes = models.TextField(blank=True, null=True)
+    assistingNurse = models.CharField(max_length=255, blank=True, null=True)
 
     def __str__(self):
         return f"{self.patient.name} - {self.date}"

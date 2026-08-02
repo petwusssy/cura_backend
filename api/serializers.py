@@ -14,6 +14,7 @@ class TreatmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Treatment
         fields = '__all__'
+        read_only_fields = ['consultation', 'id']
 
 class ConsultationSerializer(serializers.ModelSerializer):
     treatments = TreatmentSerializer(many=True, required=False)

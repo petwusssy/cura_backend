@@ -153,8 +153,8 @@ class Bed(models.Model):
 class BedHistory(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bed = models.ForeignKey(Bed, on_delete=models.CASCADE, related_name='history')
-    patientName = models.CharField(max_length=255)
-    patientId = models.CharField(max_length=255)
+    patientName = models.CharField(max_length=255, blank=True, null=True)
+    patientId = models.CharField(max_length=255, blank=True, null=True)
     date = models.DateField()
     timeIn = models.TimeField()
     timeOut = models.TimeField()

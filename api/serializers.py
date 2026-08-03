@@ -115,11 +115,26 @@ class BedHistorySerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 class BedSerializer(serializers.ModelSerializer):
-    history = BedHistorySerializer(many=True, read_only=True)
+    history = BedHistorySerializer(many=True, required=False)
 
     class Meta:
         model = Bed
         fields = '__all__'
+
+    def update(self, instance, validated_data):
+        history_data = validated_data.pop('history', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        
+        if history_data is not None:
+            # Recreate history based on provided list
+            instance.history.all().delete()
+            for hist_data in history_data:
+                # Remove bed from hist_data if it's there
+                hist_data.pop('bed', None)
+                BedHistory.objects.create(bed=instance, **hist_data)
+        return instance
 
 class HospitalTransferSerializer(serializers.ModelSerializer):
     class Meta:

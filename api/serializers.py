@@ -54,6 +54,13 @@ class MedicineItemSerializer(serializers.ModelSerializer):
         model = MedicineItem
         fields = '__all__'
 
+    def create(self, validated_data):
+        stock_history_data = validated_data.pop('stockHistory', [])
+        medicine = MedicineItem.objects.create(**validated_data)
+        for stock_data in stock_history_data:
+            StockHistory.objects.create(medicine=medicine, **stock_data)
+        return medicine
+
     def update(self, instance, validated_data):
         stock_history_data = validated_data.pop('stockHistory', None)
         for attr, value in validated_data.items():
@@ -77,6 +84,13 @@ class PurchaseRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = PurchaseRequest
         fields = '__all__'
+
+    def create(self, validated_data):
+        history_data = validated_data.pop('history', [])
+        request = PurchaseRequest.objects.create(**validated_data)
+        for hist_data in history_data:
+            PurchaseHistory.objects.create(request=request, **hist_data)
+        return request
 
     def update(self, instance, validated_data):
         history_data = validated_data.pop('history', None)

@@ -10,7 +10,11 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AlterField(
+        migrations.RemoveField(
+            model_name='bed',
+            name='timeOccupied',
+        ),
+        migrations.AddField(
             model_name='bed',
             name='timeOccupied',
             field=models.DateTimeField(blank=True, null=True),

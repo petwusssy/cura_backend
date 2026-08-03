@@ -113,6 +113,7 @@ class BedHistorySerializer(serializers.ModelSerializer):
     class Meta:
         model = BedHistory
         fields = '__all__'
+        read_only_fields = ('bed',)
 
 class BedSerializer(serializers.ModelSerializer):
     history = BedHistorySerializer(many=True, required=False)

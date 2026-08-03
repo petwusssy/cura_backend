@@ -148,7 +148,7 @@ class Bed(models.Model):
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Available')
     patientName = models.CharField(max_length=255, blank=True, null=True)
     patientId = models.CharField(max_length=255, blank=True, null=True) # Soft link to allow ad-hoc entries
-    timeOccupied = models.TimeField(blank=True, null=True)
+    timeOccupied = models.DateTimeField(blank=True, null=True)
 
 class BedHistory(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

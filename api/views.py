@@ -145,9 +145,15 @@ class MedicalCertificateViewSet(viewsets.ModelViewSet):
     # permission_classes = [IsAuthenticated]
 
 class BedViewSet(viewsets.ModelViewSet):
-    queryset = Bed.objects.all()
+    queryset = Bed.objects.all().order_by('bedNumber')
     serializer_class = BedSerializer
     # permission_classes = [IsAuthenticated]
+
+    def list(self, request, *args, **kwargs):
+        if not Bed.objects.exists():
+            beds_to_create = [Bed(bedNumber=i, status='Available') for i in range(1, 9)]
+            Bed.objects.bulk_create(beds_to_create)
+        return super().list(request, *args, **kwargs)
 
 class BedHistoryViewSet(viewsets.ModelViewSet):
     queryset = BedHistory.objects.all()

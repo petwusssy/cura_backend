@@ -118,6 +118,10 @@ class PurchaseRequest(models.Model):
     receivedQty = models.IntegerField(default=0)
     date = models.DateField()
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Pending')
+    description = models.CharField(max_length=255, blank=True, null=True)
+    unit = models.CharField(max_length=100, blank=True, null=True, default='Tablet')
+    prfNo = models.CharField(max_length=100, blank=True, null=True)
+    unitPrice = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
 
 class PurchaseHistory(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

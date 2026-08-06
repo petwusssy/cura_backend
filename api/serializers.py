@@ -46,6 +46,7 @@ class StockHistorySerializer(serializers.ModelSerializer):
     class Meta:
         model = StockHistory
         fields = '__all__'
+        read_only_fields = ('medicine', 'id')
 
 class MedicineItemSerializer(serializers.ModelSerializer):
     stockHistory = StockHistorySerializer(many=True, required=False)
@@ -58,6 +59,8 @@ class MedicineItemSerializer(serializers.ModelSerializer):
         stock_history_data = validated_data.pop('stockHistory', [])
         medicine = MedicineItem.objects.create(**validated_data)
         for stock_data in stock_history_data:
+            stock_data.pop('medicine', None)
+            stock_data.pop('id', None)
             StockHistory.objects.create(medicine=medicine, **stock_data)
         return medicine
 
@@ -70,6 +73,8 @@ class MedicineItemSerializer(serializers.ModelSerializer):
         if stock_history_data is not None:
             instance.stockHistory.all().delete()
             for stock_data in stock_history_data:
+                stock_data.pop('medicine', None)
+                stock_data.pop('id', None)
                 StockHistory.objects.create(medicine=instance, **stock_data)
         return instance
 
@@ -77,6 +82,7 @@ class PurchaseHistorySerializer(serializers.ModelSerializer):
     class Meta:
         model = PurchaseHistory
         fields = '__all__'
+        read_only_fields = ('request', 'id')
 
 class PurchaseRequestSerializer(serializers.ModelSerializer):
     history = PurchaseHistorySerializer(many=True, required=False)
@@ -89,6 +95,8 @@ class PurchaseRequestSerializer(serializers.ModelSerializer):
         history_data = validated_data.pop('history', [])
         request = PurchaseRequest.objects.create(**validated_data)
         for hist_data in history_data:
+            hist_data.pop('request', None)
+            hist_data.pop('id', None)
             PurchaseHistory.objects.create(request=request, **hist_data)
         return request
 
@@ -101,6 +109,8 @@ class PurchaseRequestSerializer(serializers.ModelSerializer):
         if history_data is not None:
             instance.history.all().delete()
             for hist_data in history_data:
+                hist_data.pop('request', None)
+                hist_data.pop('id', None)
                 PurchaseHistory.objects.create(request=instance, **hist_data)
         return instance
 

@@ -153,6 +153,8 @@ class Bed(models.Model):
     patientName = models.CharField(max_length=255, blank=True, null=True)
     patientId = models.CharField(max_length=255, blank=True, null=True) # Soft link to allow ad-hoc entries
     timeOccupied = models.DateTimeField(blank=True, null=True)
+    reason = models.CharField(max_length=255, blank=True, null=True)
+    allottedTime = models.IntegerField(blank=True, null=True)
 
 class BedHistory(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -163,6 +165,7 @@ class BedHistory(models.Model):
     timeIn = models.TimeField()
     timeOut = models.TimeField()
     duration = models.CharField(max_length=50)
+    reason = models.CharField(max_length=255, blank=True, null=True)
 
 class HospitalTransfer(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

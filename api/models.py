@@ -80,6 +80,8 @@ class MedicineItem(models.Model):
     STATUS_CHOICES = [
         ('Normal', 'Normal'),
         ('Low Stock', 'Low Stock'),
+        ('Out of Stock', 'Out of Stock'),
+        ('Healthy', 'Healthy'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -88,6 +90,10 @@ class MedicineItem(models.Model):
     unit = models.CharField(max_length=50)
     dateAdded = models.DateTimeField(auto_now_add=True)
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Normal')
+    batchNumber = models.CharField(max_length=100, blank=True, null=True)
+    beginningQty = models.IntegerField(blank=True, null=True)
+    dispensed = models.IntegerField(default=0)
+    threshold = models.IntegerField(default=15)
 
     def __str__(self):
         return self.name

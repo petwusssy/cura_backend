@@ -93,6 +93,7 @@ class MedicineItem(models.Model):
     batchNumber = models.CharField(max_length=100, blank=True, null=True)
     beginningQty = models.IntegerField(blank=True, null=True)
     dispensed = models.IntegerField(default=0)
+    category = models.CharField(max_length=50, default='Medicine')
     threshold = models.IntegerField(default=15)
 
     def __str__(self):

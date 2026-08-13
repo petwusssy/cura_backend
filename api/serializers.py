@@ -10,6 +10,9 @@ class PatientSerializer(serializers.ModelSerializer):
         model = Patient
         fields = '__all__'
 
+    def validate_name(self, value):
+        return value.upper() if value else value
+
 class TreatmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Treatment

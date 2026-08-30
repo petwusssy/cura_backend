@@ -22,5 +22,6 @@ urlpatterns = [
     path('auth/login/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('auth/refresh/', CustomTokenRefreshView.as_view(), name='token_refresh'),
     path('auth/logout/', LogoutView.as_view(), name='auth_logout'),
+    path('auth/google/', views.GoogleLoginView.as_view(), name='google_login'),
     path('', include(router.urls)),
 ]

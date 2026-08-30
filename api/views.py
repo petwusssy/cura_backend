@@ -1,11 +1,16 @@
 from django.http import JsonResponse
+from django.contrib.auth.models import User
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.tokens import RefreshToken
 from django.conf import settings
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, viewsets
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from google.oauth2 import id_token
+from google.auth.transport import requests
+
 from .models import (
     Patient, Consultation, Treatment, MedicineItem, StockHistory,
     PurchaseRequest, PurchaseHistory, MedicalCertificate,
@@ -17,7 +22,63 @@ from .serializers import (
     PurchaseHistorySerializer, MedicalCertificateSerializer, BedSerializer,
     BedHistorySerializer, HospitalTransferSerializer, AppNotificationSerializer
 )
-from rest_framework import status
+
+class GoogleLoginView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        token = request.data.get('id_token')
+        if not token:
+            return Response({'error': 'id_token is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            # Specify the CLIENT_ID of the app that accesses the backend:
+            # Using the web client ID provided by the user
+            CLIENT_ID = "289437991360-4ge9cgmpvjmr68pfprsvfimau1i4batr.apps.googleusercontent.com"
+            idinfo = id_token.verify_oauth2_token(token, requests.Request(), CLIENT_ID)
+
+            # ID token is valid. Get the user's email from the decoded token.
+            email = idinfo.get('email')
+            first_name = idinfo.get('given_name', '')
+            last_name = idinfo.get('family_name', '')
+
+            # Check if user exists, if not create one
+            user, created = User.objects.get_or_create(username=email, defaults={
+                'email': email,
+                'first_name': first_name,
+                'last_name': last_name
+            })
+
+            # Check if Patient profile exists, if not create one
+            patient, patient_created = Patient.objects.get_or_create(email=email, defaults={
+                'firstName': first_name,
+                'lastName': last_name,
+                'contactNumber': '',
+                'classification': 'Outsider'
+            })
+
+            # Generate JWT tokens for the user
+            refresh = RefreshToken.for_user(user)
+            refresh['username'] = user.username
+            refresh['roles'] = list(user.groups.values_list('name', flat=True))
+            if user.is_superuser:
+                refresh['roles'].append('Admin')
+
+            return Response({
+                'refresh': str(refresh),
+                'access': str(refresh.access_token),
+                'user': {
+                    'email': user.email,
+                    'first_name': user.first_name,
+                    'last_name': user.last_name,
+                    'is_new': created
+                }
+            }, status=status.HTTP_200_OK)
+
+        except ValueError as e:
+            # Invalid token
+            return Response({'error': 'Invalid token', 'details': str(e)}, status=status.HTTP_401_UNAUTHORIZED)
+
 
 def health(request):
     return JsonResponse({

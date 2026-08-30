@@ -14,7 +14,7 @@ from google.auth.transport import requests
 from .models import (
     Patient, Consultation, Treatment, MedicineItem, StockHistory,
     PurchaseRequest, PurchaseHistory, MedicalCertificate,
-    Bed, BedHistory, HospitalTransfer, AppNotification
+    Bed, BedHistory, HospitalTransfer, AppNotification, OTPVerification
 )
 from .serializers import (
     PatientSerializer, ConsultationSerializer, TreatmentSerializer,
@@ -22,6 +22,10 @@ from .serializers import (
     PurchaseHistorySerializer, MedicalCertificateSerializer, BedSerializer,
     BedHistorySerializer, HospitalTransferSerializer, AppNotificationSerializer
 )
+
+import random
+from django.utils import timezone
+from datetime import timedelta
 
 class GoogleLoginView(APIView):
     permission_classes = [AllowAny]
@@ -79,6 +83,92 @@ class GoogleLoginView(APIView):
             # Invalid token
             return Response({'error': 'Invalid token', 'details': str(e)}, status=status.HTTP_401_UNAUTHORIZED)
 
+
+class CheckEmailView(APIView):
+    permission_classes = [AllowAny]
+    def post(self, request):
+        email = request.data.get('email')
+        if not email:
+            return Response({'error': 'Email is required'}, status=400)
+        exists = Patient.objects.filter(email=email).exists()
+        return Response({'exists': exists})
+
+class RequestOTPView(APIView):
+    permission_classes = [AllowAny]
+    def post(self, request):
+        email = request.data.get('email')
+        if not email:
+            return Response({'error': 'Email is required'}, status=400)
+        
+        patient_exists = Patient.objects.filter(email=email).exists()
+        if not patient_exists:
+            return Response({'error': 'Patient not found'}, status=404)
+        
+        otp = str(random.randint(100000, 999999))
+        OTPVerification.objects.update_or_create(
+            email=email,
+            defaults={
+                'otp': otp,
+                'expires_at': timezone.now() + timedelta(minutes=10),
+                'is_verified': False
+            }
+        )
+        
+        print(f"\n=== MOCK EMAIL SENT ===")
+        print(f"To: {email}")
+        print(f"OTP: {otp}")
+        print(f"=======================\n")
+        
+        return Response({'message': 'OTP sent successfully'})
+
+class VerifyOTPView(APIView):
+    permission_classes = [AllowAny]
+    def post(self, request):
+        email = request.data.get('email')
+        otp = request.data.get('otp')
+        
+        try:
+            verification = OTPVerification.objects.get(email=email, otp=otp)
+            if timezone.now() > verification.expires_at:
+                return Response({'error': 'OTP expired'}, status=400)
+            
+            verification.is_verified = True
+            verification.save()
+            return Response({'message': 'OTP verified'})
+        except OTPVerification.DoesNotExist:
+            return Response({'error': 'Invalid OTP'}, status=400)
+
+class SetPasswordView(APIView):
+    permission_classes = [AllowAny]
+    def post(self, request):
+        email = request.data.get('email')
+        password = request.data.get('password')
+        
+        try:
+            verification = OTPVerification.objects.get(email=email, is_verified=True)
+            if timezone.now() > verification.expires_at:
+                return Response({'error': 'Session expired'}, status=400)
+            
+            user, created = User.objects.get_or_create(username=email, defaults={'email': email})
+            user.set_password(password)
+            user.save()
+            
+            verification.delete() # Cleanup
+            
+            refresh = RefreshToken.for_user(user)
+            refresh['username'] = user.username
+            refresh['roles'] = list(user.groups.values_list('name', flat=True))
+            if user.is_superuser:
+                refresh['roles'].append('Admin')
+
+            return Response({
+                'refresh': str(refresh),
+                'access': str(refresh.access_token),
+                'user': {'email': user.email, 'is_new': False}
+            })
+            
+        except OTPVerification.DoesNotExist:
+            return Response({'error': 'Email not verified or session expired'}, status=400)
 
 def health(request):
     return JsonResponse({

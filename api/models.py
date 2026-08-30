@@ -201,3 +201,13 @@ class AppNotification(models.Model):
     patientName = models.CharField(max_length=255, blank=True, null=True)
     nextDose = models.TimeField(blank=True, null=True)
     minutesLeft = models.IntegerField(blank=True, null=True)
+
+class OTPVerification(models.Model):
+    email = models.EmailField()
+    otp = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    is_verified = models.BooleanField(default=False)
+
+    def __str__(self):
+        return f"{self.email} - {self.otp}"

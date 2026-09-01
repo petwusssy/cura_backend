@@ -154,13 +154,14 @@ class RegisterView(APIView):
         # Create User
         user = User.objects.create_user(username=email, email=email, password=password)
         
-        # Create Patient Profile with placeholders
-        category_map = {
-            'student': 'Student',
-            'employee': 'Employee',
-            'outsider': 'Outsider'
-        }
-        category = category_map.get(role.lower(), 'Outsider')
+        # Auto-infer category based on email
+        if email.endswith('.student@ua.edu.ph'):
+            category = 'Student'
+        elif email.endswith('@ua.edu.ph'):
+            category = 'Employee'
+        else:
+            category = 'Outsider'
+
         name_prefix = email.split('@')[0] if '@' in email else email
         
         Patient.objects.create(
@@ -183,6 +184,55 @@ class RegisterView(APIView):
             'access': str(refresh.access_token),
             'user': {'email': user.email, 'name': name_prefix, 'is_new': True}
         }, status=status.HTTP_201_CREATED)
+
+from rest_framework.permissions import IsAuthenticated
+
+class CompleteProfileView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        data = request.data
+        
+        try:
+            patient = Patient.objects.get(email=user.email)
+        except Patient.DoesNotExist:
+            return Response({'error': 'Patient record not found for this user.'}, status=404)
+
+        # Handle ID (primary key) change if a new ID was provided (e.g. STU-2026-001)
+        new_id = data.get('id')
+        if new_id and new_id != patient.id:
+            # Create a clone with the new ID
+            old_id = patient.id
+            patient.pk = new_id
+            patient.save()
+            Patient.objects.filter(id=old_id).delete()
+            patient = Patient.objects.get(id=new_id)
+
+        # Update other fields
+        fields_to_update = [
+            'name', 'category', 'contact', 'birthday', 'age', 'sex', 
+            'emergencyContact', 'emergencyPhone', 'course', 'yearLevel', 
+            'position', 'department', 'address', 'studentCategory', 
+            'guardianName', 'gradeLevel'
+        ]
+        
+        for field in fields_to_update:
+            if field in data:
+                setattr(patient, field, data[field])
+                
+        # Also update the user's name if provided
+        if 'name' in data:
+            user.first_name = data['name']
+            user.save()
+
+        patient.save()
+
+        # Update user's is_new status so they don't see onboarding again
+        return Response({
+            'message': 'Profile completed successfully.',
+            'user': {'email': user.email, 'name': patient.name, 'is_new': False}
+        })
 
 class SetPasswordView(APIView):
     permission_classes = [AllowAny]

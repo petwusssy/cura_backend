@@ -181,7 +181,7 @@ class RegisterView(APIView):
         return Response({
             'refresh': str(refresh),
             'access': str(refresh.access_token),
-            'user': {'email': user.email, 'is_new': True}
+            'user': {'email': user.email, 'name': name_prefix, 'is_new': True}
         }, status=status.HTTP_201_CREATED)
 
 class SetPasswordView(APIView):
@@ -207,10 +207,12 @@ class SetPasswordView(APIView):
             if user.is_superuser:
                 refresh['roles'].append('Admin')
 
+            patient = Patient.objects.filter(email=email).first()
+            patient_name = patient.name if patient else email.split('@')[0]
             return Response({
                 'refresh': str(refresh),
                 'access': str(refresh.access_token),
-                'user': {'email': user.email, 'is_new': False}
+                'user': {'email': user.email, 'name': patient_name, 'is_new': False}
             })
             
         except OTPVerification.DoesNotExist:

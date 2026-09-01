@@ -25,6 +25,7 @@ urlpatterns = [
     path('auth/google/', views.GoogleLoginView.as_view(), name='google_login'),
     path('auth/check-email/', views.CheckEmailView.as_view(), name='check_email'),
     path('auth/request-otp/', views.RequestOTPView.as_view(), name='request_otp'),
+    path('auth/register/', views.RegisterView.as_view(), name='register'),
     path('auth/verify-otp/', views.VerifyOTPView.as_view(), name='verify_otp'),
     path('auth/set-password/', views.SetPasswordView.as_view(), name='set_password'),
     path('', include(router.urls)),

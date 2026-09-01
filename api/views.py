@@ -1,3 +1,4 @@
+import uuid
 from django.http import JsonResponse
 from django.contrib.auth.models import User
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
@@ -137,6 +138,51 @@ class VerifyOTPView(APIView):
             return Response({'message': 'OTP verified'})
         except OTPVerification.DoesNotExist:
             return Response({'error': 'Invalid OTP'}, status=400)
+class RegisterView(APIView):
+    permission_classes = [AllowAny]
+    def post(self, request):
+        email = request.data.get('email')
+        password = request.data.get('password')
+        role = request.data.get('role', 'Outsider')
+        
+        if not email or not password:
+            return Response({'error': 'Email and password are required'}, status=400)
+            
+        if User.objects.filter(username=email).exists():
+            return Response({'error': 'User already exists'}, status=400)
+            
+        # Create User
+        user = User.objects.create_user(username=email, email=email, password=password)
+        
+        # Create Patient Profile with placeholders
+        category_map = {
+            'student': 'Student',
+            'employee': 'Employee',
+            'outsider': 'Outsider'
+        }
+        category = category_map.get(role.lower(), 'Outsider')
+        name_prefix = email.split('@')[0] if '@' in email else email
+        
+        Patient.objects.create(
+            id=uuid.uuid4().hex[:8], # Short UUID for ID
+            name=name_prefix,
+            category=category,
+            contact='Not Provided',
+            birthday='2000-01-01', # Placeholder
+            age=0,
+            email=email
+        )
+        
+        # Return JWT token
+        refresh = RefreshToken.for_user(user)
+        refresh['username'] = user.username
+        refresh['roles'] = list(user.groups.values_list('name', flat=True))
+        
+        return Response({
+            'refresh': str(refresh),
+            'access': str(refresh.access_token),
+            'user': {'email': user.email, 'is_new': True}
+        }, status=status.HTTP_201_CREATED)
 
 class SetPasswordView(APIView):
     permission_classes = [AllowAny]

@@ -92,7 +92,8 @@ class CheckEmailView(APIView):
         if not email:
             return Response({'error': 'Email is required'}, status=400)
         exists = Patient.objects.filter(email=email).exists()
-        return Response({'exists': exists})
+        claimed = User.objects.filter(username=email).exists()
+        return Response({'exists': exists, 'claimed': claimed})
 
 class RequestOTPView(APIView):
     permission_classes = [AllowAny]

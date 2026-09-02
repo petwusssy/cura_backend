@@ -5,10 +5,19 @@ from .models import (
     Bed, BedHistory, HospitalTransfer, AppNotification
 )
 
+from django.contrib.auth.models import User
+
 class PatientSerializer(serializers.ModelSerializer):
+    isClaimed = serializers.SerializerMethodField()
+
     class Meta:
         model = Patient
         fields = '__all__'
+
+    def get_isClaimed(self, obj):
+        if not obj.email:
+            return False
+        return User.objects.filter(username=obj.email).exists()
 
     def validate_name(self, value):
         return value.upper() if value else value

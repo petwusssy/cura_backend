@@ -470,3 +470,46 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(telemed_request)
         return Response(serializer.data)
 
+from .models import AppointmentRequest
+from .serializers import AppointmentRequestSerializer
+
+class AppointmentRequestViewSet(viewsets.ModelViewSet):
+    queryset = AppointmentRequest.objects.all().order_by('-created_at')
+    serializer_class = AppointmentRequestSerializer
+    # permission_classes = [IsAuthenticated]
+
+    @action(detail=True, methods=['patch'])
+    def approve(self, request, pk=None):
+        appointment = self.get_object()
+        
+        scheduled_date = request.data.get('scheduled_date')
+        scheduled_time = request.data.get('scheduled_time')
+        status = request.data.get('status', 'Approved')
+        
+        appointment.status = status
+        
+        if status == 'Approved':
+            if scheduled_date:
+                appointment.scheduled_date = scheduled_date
+            if scheduled_time:
+                appointment.scheduled_time = scheduled_time
+                
+            appointment.save()
+            
+            print("\n=== MOCK EMAIL SENT ===")
+            print(f"To: {appointment.patient.email}")
+            print(f"Subject: In-Person Appointment Approved")
+            print(f"Your appointment is approved for {scheduled_date} at {scheduled_time}.")
+            print("=======================\n")
+            
+        elif status == 'Rejected':
+            appointment.save()
+            print("\n=== MOCK EMAIL SENT ===")
+            print(f"To: {appointment.patient.email}")
+            print(f"Subject: Appointment Update")
+            print(f"Your appointment request has been rejected. Please contact the clinic for more details.")
+            print("=======================\n")
+            
+        serializer = self.get_serializer(appointment)
+        return Response(serializer.data)
+

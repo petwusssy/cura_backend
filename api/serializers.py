@@ -177,3 +177,12 @@ class TelemedicineRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = TelemedicineRequest
         fields = '__all__'
+
+from .models import AppointmentRequest
+
+class AppointmentRequestSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source='patient.name', read_only=True)
+    
+    class Meta:
+        model = AppointmentRequest
+        fields = '__all__'

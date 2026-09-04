@@ -211,3 +211,29 @@ class OTPVerification(models.Model):
 
     def __str__(self):
         return f"{self.email} - {self.otp}"
+
+class TelemedicineRequest(models.Model):
+    STATUS_CHOICES = [
+        ('Pending', 'Pending'),
+        ('Approved', 'Approved'),
+        ('Rejected', 'Rejected'),
+        ('Completed', 'Completed'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name='telemedicine_requests')
+    preferred_date = models.DateField()
+    preferred_time = models.CharField(max_length=50)
+    reason = models.TextField()
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Pending')
+    
+    # Fields filled by Admin upon approval
+    scheduled_date = models.DateField(blank=True, null=True)
+    scheduled_time = models.CharField(max_length=50, blank=True, null=True)
+    meeting_link = models.URLField(max_length=500, blank=True, null=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Telemed - {self.patient.name} ({self.status})"

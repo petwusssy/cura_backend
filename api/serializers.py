@@ -168,3 +168,12 @@ class AppNotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = AppNotification
         fields = '__all__'
+
+from .models import TelemedicineRequest
+
+class TelemedicineRequestSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source='patient.name', read_only=True)
+    
+    class Meta:
+        model = TelemedicineRequest
+        fields = '__all__'

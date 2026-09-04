@@ -420,3 +420,53 @@ class AppNotificationViewSet(viewsets.ModelViewSet):
     serializer_class = AppNotificationSerializer
     # permission_classes = [IsAuthenticated]
 
+from .models import TelemedicineRequest
+from .serializers import TelemedicineRequestSerializer
+from rest_framework.decorators import action
+
+class TelemedicineRequestViewSet(viewsets.ModelViewSet):
+    queryset = TelemedicineRequest.objects.all().order_by('-created_at')
+    serializer_class = TelemedicineRequestSerializer
+    # permission_classes = [IsAuthenticated]
+
+    @action(detail=True, methods=['patch'])
+    def approve(self, request, pk=None):
+        telemed_request = self.get_object()
+        
+        # Admin provides these fields in the request body
+        scheduled_date = request.data.get('scheduled_date')
+        scheduled_time = request.data.get('scheduled_time')
+        meeting_link = request.data.get('meeting_link')
+        status = request.data.get('status', 'Approved')
+        
+        telemed_request.status = status
+        
+        if status == 'Approved':
+            if scheduled_date:
+                telemed_request.scheduled_date = scheduled_date
+            if scheduled_time:
+                telemed_request.scheduled_time = scheduled_time
+            if meeting_link:
+                telemed_request.meeting_link = meeting_link
+                
+            telemed_request.save()
+            
+            # Simulated Email Sending
+            print("\n=== MOCK EMAIL SENT ===")
+            print(f"To: {telemed_request.patient.email}")
+            print(f"Subject: Telemedicine Consultation Approved")
+            print(f"Your consultation is approved for {scheduled_date} at {scheduled_time}.")
+            print(f"Meeting Link: {meeting_link}")
+            print("=======================\n")
+            
+        elif status == 'Rejected':
+            telemed_request.save()
+            print("\n=== MOCK EMAIL SENT ===")
+            print(f"To: {telemed_request.patient.email}")
+            print(f"Subject: Telemedicine Consultation Update")
+            print(f"Your consultation request has been rejected. Please contact the clinic for more details.")
+            print("=======================\n")
+            
+        serializer = self.get_serializer(telemed_request)
+        return Response(serializer.data)
+

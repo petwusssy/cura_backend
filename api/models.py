@@ -191,6 +191,10 @@ class AppNotification(models.Model):
         ('medication', 'medication'),
         ('bed', 'bed'),
         ('general', 'general'),
+        ('telemedicine_request', 'telemedicine_request'),
+        ('appointment_request', 'appointment_request'),
+        ('telemedicine_update', 'telemedicine_update'),
+        ('appointment_update', 'appointment_update'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -199,6 +203,7 @@ class AppNotification(models.Model):
     time = models.DateTimeField(auto_now_add=True)
     read = models.BooleanField(default=False)
     patientName = models.CharField(max_length=255, blank=True, null=True)
+    patient_id = models.CharField(max_length=255, blank=True, null=True)
     nextDose = models.TimeField(blank=True, null=True)
     minutesLeft = models.IntegerField(blank=True, null=True)
 

@@ -429,6 +429,21 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
     serializer_class = TelemedicineRequestSerializer
     # permission_classes = [IsAuthenticated]
 
+    def create(self, request, *args, **kwargs):
+        response = super().create(request, *args, **kwargs)
+        if response.status_code == 201:
+            from .models import AppNotification, Patient
+            patient_id = response.data.get('patient')
+            patient = Patient.objects.filter(id=patient_id).first()
+            p_name = patient.name if patient else patient_id
+            AppNotification.objects.create(
+                type='telemedicine_request',
+                message=f"New Telemedicine Request from {p_name}",
+                patientName=p_name,
+                patient_id=patient_id
+            )
+        return response
+
     @action(detail=True, methods=['patch'])
     def approve(self, request, pk=None):
         telemed_request = self.get_object()
@@ -458,6 +473,13 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
             print(f"Your consultation is approved for {scheduled_date} at {scheduled_time}.")
             print(f"Meeting Link: {meeting_link}")
             print("=======================\n")
+            from .models import AppNotification
+            AppNotification.objects.create(
+                type='telemedicine_update',
+                message=f"Your telemedicine consultation is approved for {scheduled_date} at {scheduled_time}.",
+                patientName=telemed_request.patient.name,
+                patient_id=telemed_request.patient.id
+            )
             
         elif status == 'Rejected':
             telemed_request.save()
@@ -466,6 +488,13 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
             print(f"Subject: Telemedicine Consultation Update")
             print(f"Your consultation request has been rejected. Please contact the clinic for more details.")
             print("=======================\n")
+            from .models import AppNotification
+            AppNotification.objects.create(
+                type='telemedicine_update',
+                message=f"Your telemedicine consultation request has been rejected.",
+                patientName=telemed_request.patient.name,
+                patient_id=telemed_request.patient.id
+            )
             
         serializer = self.get_serializer(telemed_request)
         return Response(serializer.data)
@@ -477,6 +506,21 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
     queryset = AppointmentRequest.objects.all().order_by('-created_at')
     serializer_class = AppointmentRequestSerializer
     # permission_classes = [IsAuthenticated]
+
+    def create(self, request, *args, **kwargs):
+        response = super().create(request, *args, **kwargs)
+        if response.status_code == 201:
+            from .models import AppNotification, Patient
+            patient_id = response.data.get('patient')
+            patient = Patient.objects.filter(id=patient_id).first()
+            p_name = patient.name if patient else patient_id
+            AppNotification.objects.create(
+                type='appointment_request',
+                message=f"New Appointment Request from {p_name}",
+                patientName=p_name,
+                patient_id=patient_id
+            )
+        return response
 
     @action(detail=True, methods=['patch'])
     def approve(self, request, pk=None):
@@ -501,6 +545,13 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
             print(f"Subject: In-Person Appointment Approved")
             print(f"Your appointment is approved for {scheduled_date} at {scheduled_time}.")
             print("=======================\n")
+            from .models import AppNotification
+            AppNotification.objects.create(
+                type='appointment_update',
+                message=f"Your appointment is approved for {scheduled_date} at {scheduled_time}.",
+                patientName=appointment.patient.name,
+                patient_id=appointment.patient.id
+            )
             
         elif status == 'Rejected':
             appointment.save()
@@ -509,6 +560,13 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
             print(f"Subject: Appointment Update")
             print(f"Your appointment request has been rejected. Please contact the clinic for more details.")
             print("=======================\n")
+            from .models import AppNotification
+            AppNotification.objects.create(
+                type='appointment_update',
+                message=f"Your appointment request has been rejected.",
+                patientName=appointment.patient.name,
+                patient_id=appointment.patient.id
+            )
             
         serializer = self.get_serializer(appointment)
         return Response(serializer.data)

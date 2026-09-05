@@ -237,3 +237,29 @@ class TelemedicineRequest(models.Model):
 
     def __str__(self):
         return f"Telemed - {self.patient.name} ({self.status})"
+
+class AppointmentRequest(models.Model):
+    STATUS_CHOICES = [
+        ('Pending', 'Pending'),
+        ('Approved', 'Approved'),
+        ('Rejected', 'Rejected'),
+        ('Completed', 'Completed'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name='appointment_requests')
+    visit_type = models.CharField(max_length=100) # e.g. medical, dental, clearance
+    preferred_date = models.DateField()
+    preferred_time = models.CharField(max_length=50)
+    reason = models.TextField()
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Pending')
+    
+    # Fields filled by Admin upon approval
+    scheduled_date = models.DateField(blank=True, null=True)
+    scheduled_time = models.CharField(max_length=50, blank=True, null=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Appointment - {self.patient.name} ({self.status})"

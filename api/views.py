@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, viewsets
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.decorators import action
 from google.oauth2 import id_token
 from google.auth.transport import requests
 
@@ -419,13 +420,17 @@ class HospitalTransferViewSet(viewsets.ModelViewSet):
     # permission_classes = [IsAuthenticated]
 
 class AppNotificationViewSet(viewsets.ModelViewSet):
-    queryset = AppNotification.objects.all()
+    queryset = AppNotification.objects.all().order_by('-time')
     serializer_class = AppNotificationSerializer
     # permission_classes = [IsAuthenticated]
 
+    @action(detail=False, methods=['post', 'patch'])
+    def mark_all_read(self, request):
+        AppNotification.objects.filter(read=False).update(read=True)
+        return Response({'status': 'all marked as read'})
+
 from .models import TelemedicineRequest
 from .serializers import TelemedicineRequestSerializer
-from rest_framework.decorators import action
 
 class TelemedicineRequestViewSet(viewsets.ModelViewSet):
     queryset = TelemedicineRequest.objects.all().order_by('-created_at')

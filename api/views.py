@@ -472,8 +472,8 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
                 telemed_request.scheduled_time = scheduled_time
             
             clean_room_id = str(telemed_request.id).replace('-', '')[:8]
-            if not meeting_link or not str(meeting_link).startswith('http'):
-                meeting_link = f"https://meet.jit.si/CURA-Telemed-{clean_room_id}"
+            if not meeting_link or not str(meeting_link).startswith('http') or 'meet.jit.si' in str(meeting_link):
+                meeting_link = f"https://cura-bice.vercel.app/call/CURA-Telemed-{clean_room_id}"
             
             telemed_request.meeting_link = meeting_link
             if secondary_link is not None:

@@ -470,8 +470,12 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
                 telemed_request.scheduled_date = scheduled_date
             if scheduled_time:
                 telemed_request.scheduled_time = scheduled_time
-            if meeting_link:
-                telemed_request.meeting_link = meeting_link
+            
+            clean_room_id = str(telemed_request.id).replace('-', '')[:8]
+            if not meeting_link or not str(meeting_link).startswith('http'):
+                meeting_link = f"https://meet.jit.si/CURA-Telemed-{clean_room_id}"
+            
+            telemed_request.meeting_link = meeting_link
             if secondary_link is not None:
                 telemed_request.secondary_link = secondary_link
                 

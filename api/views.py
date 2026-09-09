@@ -460,6 +460,7 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
         scheduled_date = request.data.get('scheduled_date')
         scheduled_time = request.data.get('scheduled_time')
         meeting_link = request.data.get('meeting_link')
+        secondary_link = request.data.get('secondary_link')
         status = request.data.get('status', 'Approved')
         
         telemed_request.status = status
@@ -471,6 +472,8 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
                 telemed_request.scheduled_time = scheduled_time
             if meeting_link:
                 telemed_request.meeting_link = meeting_link
+            if secondary_link is not None:
+                telemed_request.secondary_link = secondary_link
                 
             telemed_request.save()
             

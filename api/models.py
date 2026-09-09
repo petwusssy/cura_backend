@@ -260,6 +260,7 @@ class TelemedicineRequest(models.Model):
     scheduled_date = models.DateField(blank=True, null=True)
     scheduled_time = models.CharField(max_length=50, blank=True, null=True)
     meeting_link = models.URLField(max_length=500, blank=True, null=True)
+    secondary_link = models.URLField(max_length=500, blank=True, null=True)
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

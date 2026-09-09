@@ -20,7 +20,7 @@ class PatientSerializer(serializers.ModelSerializer):
         return User.objects.filter(username=obj.email).exists()
 
     def validate_name(self, value):
-        return value.upper() if value else value
+        return value.strip().upper() if value else value
 
 class TreatmentSerializer(serializers.ModelSerializer):
     class Meta:

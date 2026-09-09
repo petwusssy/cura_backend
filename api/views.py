@@ -163,7 +163,7 @@ class RegisterView(APIView):
         else:
             category = 'Outsider'
 
-        name_prefix = email.split('@')[0] if '@' in email else email
+        name_prefix = (email.split('@')[0] if '@' in email else email).upper()
         
         Patient.objects.create(
             id=uuid.uuid4().hex[:8], # Short UUID for ID
@@ -220,11 +220,14 @@ class CompleteProfileView(APIView):
         
         for field in fields_to_update:
             if field in data:
-                setattr(patient, field, data[field])
+                val = data[field]
+                if field in ['name', 'guardianName', 'emergencyContact'] and isinstance(val, str):
+                    val = val.strip().upper()
+                setattr(patient, field, val)
                 
         # Also update the user's name if provided
-        if 'name' in data:
-            user.first_name = data['name']
+        if 'name' in data and data['name']:
+            user.first_name = str(data['name']).strip().upper()
             user.save()
 
         patient.save()

@@ -28,6 +28,15 @@ class Patient(models.Model):
     guardianName = models.CharField(max_length=255, blank=True, null=True)
     gradeLevel = models.CharField(max_length=50, blank=True, null=True)
 
+    def save(self, *args, **kwargs):
+        if self.name:
+            self.name = self.name.strip().upper()
+        if self.guardianName:
+            self.guardianName = self.guardianName.strip().upper()
+        if self.emergencyContact:
+            self.emergencyContact = self.emergencyContact.strip().upper()
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return self.name
 
@@ -163,6 +172,11 @@ class Bed(models.Model):
     reason = models.CharField(max_length=255, blank=True, null=True)
     allottedTime = models.IntegerField(blank=True, null=True)
 
+    def save(self, *args, **kwargs):
+        if self.patientName:
+            self.patientName = self.patientName.strip().upper()
+        super().save(*args, **kwargs)
+
 class BedHistory(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bed = models.ForeignKey(Bed, on_delete=models.CASCADE, related_name='history')
@@ -173,6 +187,11 @@ class BedHistory(models.Model):
     timeOut = models.TimeField()
     duration = models.CharField(max_length=50)
     reason = models.CharField(max_length=255, blank=True, null=True)
+
+    def save(self, *args, **kwargs):
+        if self.patientName:
+            self.patientName = self.patientName.strip().upper()
+        super().save(*args, **kwargs)
 
 class HospitalTransfer(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -206,6 +225,11 @@ class AppNotification(models.Model):
     patient_id = models.CharField(max_length=255, blank=True, null=True)
     nextDose = models.TimeField(blank=True, null=True)
     minutesLeft = models.IntegerField(blank=True, null=True)
+
+    def save(self, *args, **kwargs):
+        if self.patientName:
+            self.patientName = self.patientName.strip().upper()
+        super().save(*args, **kwargs)
 
 class OTPVerification(models.Model):
     email = models.EmailField()

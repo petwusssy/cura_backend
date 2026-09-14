@@ -292,6 +292,15 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         token['roles'] = roles
         return token
 
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        roles = list(self.user.groups.values_list('name', flat=True))
+        if self.user.is_superuser:
+            roles.append('Admin')
+        data['roles'] = roles
+        data['username'] = self.user.username
+        return data
+
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
 

@@ -617,12 +617,12 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
             return Response({"error": "Patient not found"}, status=status.HTTP_400_BAD_REQUEST)
 
         # Check if patient already in queue and not done
-        existing = PatientQueue.objects.filter(patient_id=patient_id, status__in=['waiting', 'called'], date=timezone.now().date()).first()
+        existing = PatientQueue.objects.filter(patient_id=patient_id, status__in=['waiting', 'called'], date=timezone.localdate()).first()
         if existing:
             return Response({"error": "Patient already in active queue today"}, status=status.HTTP_400_BAD_REQUEST)
             
         # Get next queue number for today
-        today = timezone.now().date()
+        today = timezone.localdate()
         last_queue = PatientQueue.objects.filter(date=today).order_by('-queue_number').first()
         queue_number = 1 if not last_queue else last_queue.queue_number + 1
         

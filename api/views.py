@@ -597,6 +597,7 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
 
 from .models import PatientQueue
 from .serializers import PatientQueueSerializer
+from django.db import transaction
 
 class PatientQueueViewSet(viewsets.ModelViewSet):
     queryset = PatientQueue.objects.all().order_by('queue_number')
@@ -608,7 +609,6 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
         if not patient_id:
             return Response({"error": "Patient ID is required"}, status=status.HTTP_400_BAD_REQUEST)
         
-        from django.db import transaction
         from .models import Patient
         
         try:

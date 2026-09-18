@@ -293,3 +293,20 @@ class AppointmentRequest(models.Model):
 
     def __str__(self):
         return f"Appointment - {self.patient.name} ({self.status})"
+
+class PatientQueue(models.Model):
+    STATUS_CHOICES = [
+        ('waiting', 'waiting'),
+        ('called', 'called'),
+        ('done', 'done'),
+    ]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name='queues')
+    queue_number = models.IntegerField()
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='waiting')
+    date = models.DateField(auto_now_add=True)
+    time_added = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return f"Queue #{self.queue_number} - {self.patient.name} ({self.status})"
+

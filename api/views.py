@@ -595,3 +595,60 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(appointment)
         return Response(serializer.data)
 
+from .models import PatientQueue
+from .serializers import PatientQueueSerializer
+
+class PatientQueueViewSet(viewsets.ModelViewSet):
+    queryset = PatientQueue.objects.all().order_by('queue_number')
+    serializer_class = PatientQueueSerializer
+
+    def create(self, request, *args, **kwargs):
+        patient_id = request.data.get('patient')
+        if not patient_id:
+            return Response({"error": "Patient ID is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check if patient already in queue and not done
+        existing = PatientQueue.objects.filter(patient_id=patient_id, status__in=['waiting', 'called'], date=timezone.now().date()).first()
+        if existing:
+            return Response({"error": "Patient already in active queue today"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        # Get next queue number for today
+        today = timezone.now().date()
+        last_queue = PatientQueue.objects.filter(date=today).order_by('-queue_number').first()
+        queue_number = 1 if not last_queue else last_queue.queue_number + 1
+        
+        queue = PatientQueue.objects.create(
+            patient_id=patient_id,
+            queue_number=queue_number,
+            status='waiting'
+        )
+        serializer = self.get_serializer(queue)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['patch'])
+    def notify(self, request, pk=None):
+        queue = self.get_object()
+        if queue.status != 'waiting':
+            return Response({"error": "Only waiting patients can be notified"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        queue.status = 'called'
+        queue.save()
+        
+        from .models import AppNotification
+        AppNotification.objects.create(
+            type='general',
+            message=f"It's your turn! Please proceed to the clinic counter.",
+            patientName=queue.patient.name,
+            patient_id=queue.patient.id
+        )
+        
+        serializer = self.get_serializer(queue)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['patch'])
+    def complete(self, request, pk=None):
+        queue = self.get_object()
+        queue.status = 'done'
+        queue.save()
+        serializer = self.get_serializer(queue)
+        return Response(serializer.data)

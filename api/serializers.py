@@ -186,3 +186,13 @@ class AppointmentRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = AppointmentRequest
         fields = '__all__'
+
+from .models import PatientQueue
+
+class PatientQueueSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source='patient.name', read_only=True)
+
+    class Meta:
+        model = PatientQueue
+        fields = '__all__'
+

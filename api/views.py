@@ -602,11 +602,20 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
     queryset = PatientQueue.objects.all().order_by('queue_number')
     serializer_class = PatientQueueSerializer
 
+    @transaction.atomic
     def create(self, request, *args, **kwargs):
         patient_id = request.data.get('patient')
         if not patient_id:
             return Response({"error": "Patient ID is required"}, status=status.HTTP_400_BAD_REQUEST)
         
+        from django.db import transaction
+        from .models import Patient
+        
+        try:
+            patient = Patient.objects.select_for_update().get(id=patient_id)
+        except Patient.DoesNotExist:
+            return Response({"error": "Patient not found"}, status=status.HTTP_400_BAD_REQUEST)
+
         # Check if patient already in queue and not done
         existing = PatientQueue.objects.filter(patient_id=patient_id, status__in=['waiting', 'called'], date=timezone.now().date()).first()
         if existing:
@@ -618,7 +627,7 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
         queue_number = 1 if not last_queue else last_queue.queue_number + 1
         
         queue = PatientQueue.objects.create(
-            patient_id=patient_id,
+            patient=patient,
             queue_number=queue_number,
             status='waiting'
         )

@@ -613,8 +613,15 @@ from .serializers import PatientQueueSerializer
 from django.db import transaction
 
 class PatientQueueViewSet(viewsets.ModelViewSet):
-    queryset = PatientQueue.objects.all().order_by('queue_number')
     serializer_class = PatientQueueSerializer
+
+    def get_queryset(self):
+        req_date = self.request.query_params.get('date')
+        if self.request.query_params.get('all') == 'true':
+            return PatientQueue.objects.all().order_by('queue_number')
+        if req_date:
+            return PatientQueue.objects.filter(date=req_date).order_by('queue_number')
+        return PatientQueue.objects.filter(date=timezone.localdate()).order_by('queue_number')
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
@@ -630,12 +637,12 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
             return Response({"error": "Patient not found"}, status=status.HTTP_400_BAD_REQUEST)
 
         # Check if patient already in queue and not done
-        existing = PatientQueue.objects.filter(patient_id=patient_id, status__in=['waiting', 'called'], date=timezone.localdate()).first()
+        today = timezone.localdate()
+        existing = PatientQueue.objects.filter(patient_id=patient_id, status__in=['waiting', 'called'], date=today).first()
         if existing:
             return Response({"error": "Patient already in active queue today"}, status=status.HTTP_400_BAD_REQUEST)
             
         # Get next queue number for today
-        today = timezone.localdate()
         last_queue = PatientQueue.objects.filter(date=today).order_by('-queue_number').first()
         queue_number = 1 if not last_queue else last_queue.queue_number + 1
         
@@ -669,6 +676,14 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['patch'])
     def complete(self, request, pk=None):
+        queue = self.get_object()
+        queue.status = 'done'
+        queue.save()
+        serializer = self.get_serializer(queue)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['patch', 'post'])
+    def cancel(self, request, pk=None):
         queue = self.get_object()
         queue.status = 'done'
         queue.save()

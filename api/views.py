@@ -307,6 +307,16 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
+        username_or_email = attrs.get(self.username_field)
+        if username_or_email:
+            username_or_email = str(username_or_email).strip()
+            from django.db.models import Q
+            matched_user = User.objects.filter(
+                Q(username__iexact=username_or_email) | Q(email__iexact=username_or_email)
+            ).first()
+            if matched_user:
+                attrs[self.username_field] = matched_user.username
+
         data = super().validate(attrs)
         roles = list(self.user.groups.values_list('name', flat=True))
         if self.user.is_superuser:

@@ -310,3 +310,11 @@ class PatientQueue(models.Model):
     def __str__(self):
         return f"Queue #{self.queue_number} - {self.patient.name} ({self.status})"
 
+from django.db.models.signals import pre_save
+from django.dispatch import receiver
+
+@receiver(pre_save, sender=User)
+def ensure_superuser_is_staff(sender, instance, **kwargs):
+    if instance.is_superuser and not instance.is_staff:
+        instance.is_staff = True
+

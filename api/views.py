@@ -249,7 +249,8 @@ class CompleteProfileView(APIView):
         # Update user's is_new status so they don't see onboarding again
         return Response({
             'message': 'Profile completed successfully.',
-            'user': {'email': user.email, 'name': patient.name, 'is_new': False}
+            'patient_id': patient.id,
+            'user': {'id': patient.id, 'email': user.email, 'name': patient.name, 'is_new': False}
         })
 
 class SetPasswordView(APIView):

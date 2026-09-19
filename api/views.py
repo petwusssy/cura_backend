@@ -641,7 +641,8 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
         today = timezone.localdate()
         existing = PatientQueue.objects.filter(patient_id=patient_id, status__in=['waiting', 'called'], date=today).first()
         if existing:
-            return Response({"error": "Patient already in active queue today"}, status=status.HTTP_400_BAD_REQUEST)
+            serializer = self.get_serializer(existing)
+            return Response(serializer.data, status=status.HTTP_200_OK)
             
         # Get next queue number for today
         last_queue = PatientQueue.objects.filter(date=today).order_by('-queue_number').first()
@@ -655,7 +656,7 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(queue)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-    @action(detail=True, methods=['patch'])
+    @action(detail=True, methods=['patch', 'post'])
     def notify(self, request, pk=None):
         queue = self.get_object()
         if queue.status != 'waiting':
@@ -675,7 +676,7 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(queue)
         return Response(serializer.data)
 
-    @action(detail=True, methods=['patch'])
+    @action(detail=True, methods=['patch', 'post'])
     def complete(self, request, pk=None):
         queue = self.get_object()
         queue.status = 'done'

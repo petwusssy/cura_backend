@@ -462,6 +462,11 @@ class AppNotificationViewSet(viewsets.ModelViewSet):
         AppNotification.objects.filter(read=False).update(read=True)
         return Response({'status': 'all marked as read'})
 
+    @action(detail=False, methods=['post', 'delete'])
+    def clear_all(self, request):
+        AppNotification.objects.all().delete()
+        return Response({'status': 'all notifications cleared'})
+
 from .models import TelemedicineRequest
 from .serializers import TelemedicineRequestSerializer
 

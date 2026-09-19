@@ -197,9 +197,22 @@ class CompleteProfileView(APIView):
         data = request.data
         
         try:
-            patient = Patient.objects.get(email=user.email)
-        except Patient.DoesNotExist:
-            return Response({'error': 'Patient record not found for this user.'}, status=404)
+            patient = Patient.objects.filter(email__iexact=user.email.strip()).first()
+            if not patient and user.username:
+                patient = Patient.objects.filter(email__iexact=user.username.strip()).first()
+            if not patient:
+                # Auto-create patient record if missing
+                patient = Patient.objects.create(
+                    id=uuid.uuid4().hex[:8],
+                    name=(user.first_name or user.username or 'User').strip().upper(),
+                    category='Outsider',
+                    contact='Not Provided',
+                    birthday='2000-01-01',
+                    age=0,
+                    email=user.email or user.username
+                )
+        except Exception as e:
+            return Response({'error': f'Patient lookup error: {str(e)}'}, status=500)
 
         # Handle ID (primary key) change if a new ID was provided (e.g. STU-2026-001)
         new_id = data.get('id')

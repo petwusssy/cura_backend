@@ -706,3 +706,35 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
         queue.save()
         serializer = self.get_serializer(queue)
         return Response(serializer.data)
+
+from .models import ClinicAdvisory
+from .serializers import ClinicAdvisorySerializer
+
+class ClinicAdvisoryViewSet(viewsets.ModelViewSet):
+    permission_classes = [AllowAny]
+    queryset = ClinicAdvisory.objects.all()
+    serializer_class = ClinicAdvisorySerializer
+
+    def list(self, request, *args, **kwargs):
+        advisory = ClinicAdvisory.objects.first()
+        if not advisory:
+            advisory = ClinicAdvisory.objects.create(
+                status='Closed',
+                message='Welcome to the University Clinic! Standard operating hours are 8:00 AM to 5:00 PM.'
+            )
+        serializer = self.get_serializer(advisory)
+        return Response(serializer.data)
+
+    def create(self, request, *args, **kwargs):
+        status_val = request.data.get('status', 'Closed')
+        message_val = request.data.get('message', '')
+        advisory = ClinicAdvisory.objects.first()
+        if advisory:
+            advisory.status = status_val
+            advisory.message = message_val
+            advisory.save()
+        else:
+            advisory = ClinicAdvisory.objects.create(status=status_val, message=message_val)
+        serializer = self.get_serializer(advisory)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+

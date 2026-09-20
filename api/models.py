@@ -310,6 +310,15 @@ class PatientQueue(models.Model):
     def __str__(self):
         return f"Queue #{self.queue_number} - {self.patient.name} ({self.status})"
 
+class ClinicAdvisory(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    status = models.CharField(max_length=50, default='Closed')
+    message = models.TextField(default='Welcome to the University Clinic! Standard operating hours are 8:00 AM to 5:00 PM.')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Advisory ({self.status}) - {self.message[:30]}"
+
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
 
@@ -317,4 +326,5 @@ from django.dispatch import receiver
 def ensure_superuser_is_staff(sender, instance, **kwargs):
     if instance.is_superuser and not instance.is_staff:
         instance.is_staff = True
+
 

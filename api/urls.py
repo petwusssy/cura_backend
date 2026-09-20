@@ -19,6 +19,8 @@ router.register(r'notifications', views.AppNotificationViewSet)
 router.register(r'telemedicine', views.TelemedicineRequestViewSet, basename='telemedicine')
 router.register(r'appointments', views.AppointmentRequestViewSet, basename='appointments')
 router.register(r'queue', views.PatientQueueViewSet, basename='queue')
+router.register(r'advisory', views.ClinicAdvisoryViewSet, basename='advisory')
+
 
 urlpatterns = [
     path('health/', views.health, name='health'),

@@ -187,7 +187,7 @@ class AppointmentRequestSerializer(serializers.ModelSerializer):
         model = AppointmentRequest
         fields = '__all__'
 
-from .models import PatientQueue
+from .models import PatientQueue, ClinicAdvisory
 
 class PatientQueueSerializer(serializers.ModelSerializer):
     patient_name = serializers.CharField(source='patient.name', read_only=True)
@@ -195,4 +195,10 @@ class PatientQueueSerializer(serializers.ModelSerializer):
     class Meta:
         model = PatientQueue
         fields = '__all__'
+
+class ClinicAdvisorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ClinicAdvisory
+        fields = '__all__'
+
 

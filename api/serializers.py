@@ -127,6 +127,8 @@ class PurchaseRequestSerializer(serializers.ModelSerializer):
         return instance
 
 class MedicalCertificateSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source='patient.name', read_only=True)
+
     class Meta:
         model = MedicalCertificate
         fields = '__all__'

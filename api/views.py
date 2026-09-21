@@ -431,6 +431,21 @@ class MedicalCertificateViewSet(viewsets.ModelViewSet):
     serializer_class = MedicalCertificateSerializer
     # permission_classes = [IsAuthenticated]
 
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        try:
+            from .models import AppNotification
+            p = instance.patient
+            AppNotification.objects.create(
+                type='general',
+                message=f'Your Medical Certificate ({instance.purpose}) has been issued by {instance.doctor or "Clinic Physician"}.',
+                patientName=p.name,
+                patient_id=str(p.id),
+                read=False
+            )
+        except Exception as e:
+            print("Certificate notification note:", e)
+
 class BedViewSet(viewsets.ModelViewSet):
     queryset = Bed.objects.all().order_by('bedNumber')
     serializer_class = BedSerializer

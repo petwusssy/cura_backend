@@ -60,12 +60,23 @@ class ConsultationSerializer(serializers.ModelSerializer):
         return instance
 
 class StockHistorySerializer(serializers.ModelSerializer):
+    date = serializers.DateTimeField(
+        format='%Y-%m-%d %I:%M %p',
+        required=False,
+        input_formats=['%Y-%m-%d', '%Y-%m-%d %I:%M %p', 'iso-8601']
+    )
+
     class Meta:
         model = StockHistory
         fields = '__all__'
         read_only_fields = ('medicine', 'id')
 
 class MedicineItemSerializer(serializers.ModelSerializer):
+    dateAdded = serializers.DateTimeField(
+        format='%Y-%m-%d',
+        required=False,
+        input_formats=['%Y-%m-%d', 'iso-8601']
+    )
     stockHistory = StockHistorySerializer(many=True, required=False)
 
     class Meta:

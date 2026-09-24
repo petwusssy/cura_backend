@@ -387,6 +387,20 @@ class PatientViewSet(viewsets.ModelViewSet):
     serializer_class = PatientSerializer
     # permission_classes = [IsAuthenticated]
 
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        name = serializer.validated_data.get('name', '').strip().upper()
+        birthday = serializer.validated_data.get('birthday')
+        if name and birthday:
+            existing = Patient.objects.filter(name__iexact=name, birthday=birthday).first()
+            if existing:
+                return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+
+        return super().create(request, *args, **kwargs)
+
 class ConsultationViewSet(viewsets.ModelViewSet):
     queryset = Consultation.objects.all()
     serializer_class = ConsultationSerializer
@@ -399,7 +413,42 @@ class ConsultationViewSet(viewsets.ModelViewSet):
             sys.stderr.write(f"Validation Error: {serializer.errors}\n")
             sys.stderr.flush()
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # Idempotency / Duplicate prevention
+        patient = serializer.validated_data.get('patient')
+        date = serializer.validated_data.get('date')
+        time_in = serializer.validated_data.get('timeIn')
+        complaint = serializer.validated_data.get('complaint', '')
+        stat = serializer.validated_data.get('status')
+
+        existing = Consultation.objects.filter(
+            patient=patient,
+            date=date,
+            timeIn=time_in,
+            complaint=complaint,
+            status=stat
+        ).first()
+
+        if existing:
+            return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+
         return super().create(request, *args, **kwargs)
+
+    def list(self, request, *args, **kwargs):
+        # Auto-clean duplicate records in database
+        seen = set()
+        duplicates_to_delete = []
+        for c in Consultation.objects.all().order_by('id'):
+            key = (str(c.patient_id), str(c.date), str(c.timeIn), str(c.complaint or '').strip(), str(c.status))
+            if key in seen:
+                duplicates_to_delete.append(c.id)
+            else:
+                seen.add(key)
+
+        if duplicates_to_delete:
+            Consultation.objects.filter(id__in=duplicates_to_delete).delete()
+
+        return super().list(request, *args, **kwargs)
 
 class TreatmentViewSet(viewsets.ModelViewSet):
     queryset = Treatment.objects.all()
@@ -430,6 +479,42 @@ class MedicalCertificateViewSet(viewsets.ModelViewSet):
     queryset = MedicalCertificate.objects.all()
     serializer_class = MedicalCertificateSerializer
     # permission_classes = [IsAuthenticated]
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        patient = serializer.validated_data.get('patient')
+        date = serializer.validated_data.get('date')
+        purpose = serializer.validated_data.get('purpose', '')
+        diagnosis = serializer.validated_data.get('diagnosis', '')
+
+        existing = MedicalCertificate.objects.filter(
+            patient=patient,
+            date=date,
+            purpose=purpose,
+            diagnosis=diagnosis
+        ).first()
+
+        if existing:
+            return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+
+        return super().create(request, *args, **kwargs)
+
+    def list(self, request, *args, **kwargs):
+        seen = set()
+        duplicates_to_delete = []
+        for cert in MedicalCertificate.objects.all().order_by('id'):
+            key = (str(cert.patient_id), str(cert.date), str(cert.purpose or '').strip())
+            if key in seen:
+                duplicates_to_delete.append(cert.id)
+            else:
+                seen.add(key)
+        if duplicates_to_delete:
+            MedicalCertificate.objects.filter(id__in=duplicates_to_delete).delete()
+
+        return super().list(request, *args, **kwargs)
 
     def perform_create(self, serializer):
         instance = serializer.save()

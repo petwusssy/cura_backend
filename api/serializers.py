@@ -72,6 +72,15 @@ class MedicineItemSerializer(serializers.ModelSerializer):
         model = MedicineItem
         fields = '__all__'
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        history_dispensed = sum(
+            h.qty for h in instance.stockHistory.filter(type='dispense')
+        )
+        if (ret.get('dispensed') or 0) < history_dispensed:
+            ret['dispensed'] = history_dispensed
+        return ret
+
     def create(self, validated_data):
         stock_history_data = validated_data.pop('stockHistory', [])
         medicine = MedicineItem.objects.create(**validated_data)
@@ -79,6 +88,12 @@ class MedicineItemSerializer(serializers.ModelSerializer):
             stock_data.pop('medicine', None)
             stock_data.pop('id', None)
             StockHistory.objects.create(medicine=medicine, **stock_data)
+        history_dispensed = sum(
+            h.qty for h in medicine.stockHistory.filter(type='dispense')
+        )
+        if medicine.dispensed < history_dispensed:
+            medicine.dispensed = history_dispensed
+            medicine.save(update_fields=['dispensed'])
         return medicine
 
     def update(self, instance, validated_data):
@@ -93,6 +108,13 @@ class MedicineItemSerializer(serializers.ModelSerializer):
                 stock_data.pop('medicine', None)
                 stock_data.pop('id', None)
                 StockHistory.objects.create(medicine=instance, **stock_data)
+
+        history_dispensed = sum(
+            h.qty for h in instance.stockHistory.filter(type='dispense')
+        )
+        if instance.dispensed < history_dispensed:
+            instance.dispensed = history_dispensed
+            instance.save(update_fields=['dispensed'])
         return instance
 
 class PurchaseHistorySerializer(serializers.ModelSerializer):

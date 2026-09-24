@@ -36,6 +36,11 @@ class ConsultationSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
     def create(self, validated_data):
+        from django.utils import timezone
+        if not validated_data.get('date'):
+            validated_data['date'] = timezone.localdate()
+        if not validated_data.get('timeIn'):
+            validated_data['timeIn'] = timezone.localtime().time()
         treatments_data = validated_data.pop('treatments', [])
         consultation = Consultation.objects.create(**validated_data)
         for treatment_data in treatments_data:

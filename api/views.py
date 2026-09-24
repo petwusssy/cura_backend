@@ -681,7 +681,8 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
         queue = PatientQueue.objects.create(
             patient=patient,
             queue_number=queue_number,
-            status='waiting'
+            status='waiting',
+            date=today
         )
         serializer = self.get_serializer(queue)
         return Response(serializer.data, status=status.HTTP_201_CREATED)

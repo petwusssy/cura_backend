@@ -346,18 +346,6 @@ class CustomTokenObtainPairView(TokenObtainPairView):
                 # Do not return the refresh token in the JSON response
                 del response.data['refresh']
 
-            # Include user data so mobile client can display name/email
-            username = response.data.get('username', '')
-            user_obj = User.objects.filter(username=username).first()
-            if user_obj:
-                patient = Patient.objects.filter(email__iexact=user_obj.email or username).first()
-                patient_name = patient.name if patient else (user_obj.first_name or username.split('@')[0]).upper()
-                response.data['user'] = {
-                    'email': user_obj.email or username,
-                    'name': patient_name,
-                    'is_new': False
-                }
-
         return response
 
 class CustomTokenRefreshView(TokenRefreshView):

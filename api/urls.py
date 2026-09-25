@@ -20,6 +20,7 @@ router.register(r'telemedicine', views.TelemedicineRequestViewSet, basename='tel
 router.register(r'appointments', views.AppointmentRequestViewSet, basename='appointments')
 router.register(r'queue', views.PatientQueueViewSet, basename='queue')
 router.register(r'advisory', views.ClinicAdvisoryViewSet, basename='advisory')
+router.register(r'medcert-requests', views.MedicalCertificateRequestViewSet, basename='medcert-requests')
 
 
 urlpatterns = [

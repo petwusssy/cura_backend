@@ -839,3 +839,75 @@ class ClinicAdvisoryViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(advisory)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
+from .models import MedicalCertificateRequest
+from .serializers import MedicalCertificateRequestSerializer
+
+class MedicalCertificateRequestViewSet(viewsets.ModelViewSet):
+    queryset = MedicalCertificateRequest.objects.all().order_by('-created_at')
+    serializer_class = MedicalCertificateRequestSerializer
+
+    def create(self, request, *args, **kwargs):
+        response = super().create(request, *args, **kwargs)
+        if response.status_code == 201:
+            patient_id = response.data.get('patient')
+            patient = Patient.objects.filter(id=patient_id).first()
+            p_name = patient.name if patient else patient_id
+            AppNotification.objects.create(
+                type='medcert_request',
+                message=f"New Medical Certificate Request from {p_name}",
+                patientName=p_name,
+                patient_id=patient_id
+            )
+        return response
+
+    @action(detail=True, methods=['patch'])
+    def approve(self, request, pk=None):
+        medcert_req = self.get_object()
+        
+        status_val = request.data.get('status', 'Approved')
+        diagnosis = request.data.get('diagnosis') or medcert_req.diagnosis or medcert_req.complaint
+        recommendations = request.data.get('recommendations') or medcert_req.recommendations or 'Fit to resume regular activities.'
+        doctor = request.data.get('doctor') or 'JOHNNY MICHAEL P. MANGULABNAN, MD'
+        remarks = request.data.get('remarks', '')
+        
+        medcert_req.status = status_val
+        if diagnosis:
+            medcert_req.diagnosis = diagnosis
+        if recommendations:
+            medcert_req.recommendations = recommendations
+        if doctor:
+            medcert_req.doctor = doctor
+        if remarks:
+            medcert_req.remarks = remarks
+        medcert_req.save()
+
+        if status_val == 'Approved':
+            cert_date = timezone.now().date()
+            MedicalCertificate.objects.create(
+                patient=medcert_req.patient,
+                date=cert_date,
+                purpose=medcert_req.purpose or 'Medical Certificate issuance',
+                diagnosis=diagnosis or medcert_req.complaint,
+                recommendation=recommendations,
+                doctor=doctor,
+                issuedBy='UA CLINIC ADMIN',
+                notes=remarks or f"Issued from request #{str(medcert_req.id)[:8]}"
+            )
+            
+            AppNotification.objects.create(
+                type='certificate',
+                message="Your medical certificate request has been approved and issued.",
+                patientName=medcert_req.patient.name,
+                patient_id=medcert_req.patient.id
+            )
+        elif status_val == 'Rejected':
+            AppNotification.objects.create(
+                type='certificate',
+                message=f"Your medical certificate request has been declined. {remarks}".strip(),
+                patientName=medcert_req.patient.name,
+                patient_id=medcert_req.patient.id
+            )
+
+        serializer = self.get_serializer(medcert_req)
+        return Response(serializer.data)
+

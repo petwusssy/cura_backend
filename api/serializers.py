@@ -241,4 +241,18 @@ class ClinicAdvisorySerializer(serializers.ModelSerializer):
         model = ClinicAdvisory
         fields = '__all__'
 
+from .models import MedicalCertificateRequest
+
+class MedicalCertificateRequestSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source='patient.name', read_only=True)
+    patient_category = serializers.CharField(source='patient.category', read_only=True)
+    patient_email = serializers.CharField(source='patient.email', read_only=True)
+    patient_contact = serializers.CharField(source='patient.contact', read_only=True)
+    patient_course = serializers.CharField(source='patient.course', read_only=True)
+    patient_yearLevel = serializers.CharField(source='patient.yearLevel', read_only=True)
+
+    class Meta:
+        model = MedicalCertificateRequest
+        fields = '__all__'
+
 

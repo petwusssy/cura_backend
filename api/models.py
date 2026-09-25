@@ -319,6 +319,30 @@ class ClinicAdvisory(models.Model):
     def __str__(self):
         return f"Advisory ({self.status}) - {self.message[:30]}"
 
+class MedicalCertificateRequest(models.Model):
+    STATUS_CHOICES = [
+        ('Pending', 'Pending'),
+        ('Approved', 'Approved'),
+        ('Rejected', 'Rejected'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name='medcert_requests')
+    purpose = models.CharField(max_length=255)
+    complaint = models.TextField()
+    start_date = models.DateField(blank=True, null=True)
+    end_date = models.DateField(blank=True, null=True)
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Pending')
+    diagnosis = models.TextField(blank=True, null=True)
+    recommendations = models.TextField(blank=True, null=True)
+    doctor = models.CharField(max_length=255, blank=True, null=True)
+    remarks = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"MedCert Request - {self.patient.name} ({self.status})"
+
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
 

@@ -295,6 +295,10 @@ def health(request):
     })
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    default_error_messages = {
+        'no_active_account': 'Incorrect username or password. Please verify your credentials and try again.'
+    }
+
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
@@ -351,9 +355,14 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 import logging
                 logging.getLogger(__name__).warning(f"LoginAttempt check error: {e}")
 
+        # Attempt authentication via SimpleJWT
         try:
             data = super().validate(attrs)
-        except AuthenticationFailed:
+        except Exception as exc:
+            # Re-raise if already an explicit lockout exception
+            if isinstance(exc, AuthenticationFailed) and isinstance(exc.detail, dict) and exc.detail.get('is_locked'):
+                raise
+
             if normalized_identifier:
                 try:
                     if not login_attempt:
@@ -373,8 +382,13 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                     else:
                         remaining = MAX_ATTEMPTS - login_attempt.failed_attempts
                         login_attempt.save()
+                        msg = (
+                            "Incorrect username or password. Warning: You have only 1 attempt remaining before your account is temporarily locked."
+                            if remaining == 1
+                            else f"Incorrect username or password. You have {remaining} attempts remaining."
+                        )
                         raise AuthenticationFailed({
-                            'detail': f"Invalid username or password. You have {remaining} attempt{'s' if remaining > 1 else ''} remaining.",
+                            'detail': msg,
                             'attempts_remaining': remaining,
                             'max_attempts': MAX_ATTEMPTS,
                             'is_locked': False,
@@ -386,7 +400,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                     logging.getLogger(__name__).warning(f"LoginAttempt record error: {e}")
 
             raise AuthenticationFailed({
-                'detail': "Invalid username or password. Access denied.",
+                'detail': "Incorrect username or password. Please verify your credentials and try again.",
                 'attempts_remaining': 3,
                 'max_attempts': MAX_ATTEMPTS,
                 'is_locked': False,
@@ -415,8 +429,18 @@ class CustomTokenObtainPairView(TokenObtainPairView):
 
     def handle_exception(self, exc):
         from rest_framework.exceptions import AuthenticationFailed
-        if isinstance(exc, AuthenticationFailed) and isinstance(exc.detail, dict) and exc.detail.get('is_locked'):
-            return Response(exc.detail, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        if isinstance(exc, AuthenticationFailed):
+            if isinstance(exc.detail, str):
+                lower = exc.detail.lower()
+                if 'no active account' in lower or 'given credentials' in lower:
+                    exc.detail = {
+                        'detail': "Incorrect username or password. Please verify your credentials and try again.",
+                        'attempts_remaining': 3,
+                        'max_attempts': 4,
+                        'is_locked': False,
+                    }
+            elif isinstance(exc.detail, dict) and exc.detail.get('is_locked'):
+                return Response(exc.detail, status=status.HTTP_429_TOO_MANY_REQUESTS)
         return super().handle_exception(exc)
 
     def post(self, request, *args, **kwargs):

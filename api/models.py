@@ -343,6 +343,29 @@ class MedicalCertificateRequest(models.Model):
     def __str__(self):
         return f"MedCert Request - {self.patient.name} ({self.status})"
 
+class LoginAttempt(models.Model):
+    identifier = models.CharField(max_length=255, unique=True, db_index=True)
+    failed_attempts = models.IntegerField(default=0)
+    locked_until = models.DateTimeField(null=True, blank=True)
+    last_attempt_at = models.DateTimeField(auto_now=True)
+
+    def is_locked(self):
+        if self.locked_until:
+            from django.utils import timezone
+            return timezone.now() < self.locked_until
+        return False
+
+    def remaining_seconds(self):
+        if self.locked_until:
+            from django.utils import timezone
+            now = timezone.now()
+            if now < self.locked_until:
+                return max(0, int((self.locked_until - now).total_seconds()))
+        return 0
+
+    def __str__(self):
+        return f"LoginAttempt({self.identifier}, fails={self.failed_attempts})"
+
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
 

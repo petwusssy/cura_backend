@@ -16,7 +16,8 @@ from google.auth.transport import requests
 from .models import (
     Patient, Consultation, Treatment, MedicineItem, StockHistory,
     PurchaseRequest, PurchaseHistory, MedicalCertificate,
-    Bed, BedHistory, HospitalTransfer, AppNotification, OTPVerification
+    Bed, BedHistory, HospitalTransfer, AppNotification, OTPVerification,
+    LoginAttempt
 )
 from .serializers import (
     PatientSerializer, ConsultationSerializer, TreatmentSerializer,
@@ -307,7 +308,10 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
+        from rest_framework.exceptions import AuthenticationFailed
         username_or_email = attrs.get(self.username_field)
+        normalized_identifier = str(username_or_email or '').strip().lower()
+
         if username_or_email:
             username_or_email = str(username_or_email).strip()
             from django.db.models import Q
@@ -316,8 +320,89 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             ).first()
             if matched_user:
                 attrs[self.username_field] = matched_user.username
+                normalized_identifier = matched_user.username.lower()
 
-        data = super().validate(attrs)
+        MAX_ATTEMPTS = 4
+        LOCKOUT_MINUTES = 15
+        now = timezone.now()
+
+        login_attempt = None
+        if normalized_identifier:
+            try:
+                login_attempt, _ = LoginAttempt.objects.get_or_create(identifier=normalized_identifier)
+                if login_attempt.locked_until:
+                    if now < login_attempt.locked_until:
+                        rem_seconds = int((login_attempt.locked_until - now).total_seconds())
+                        rem_minutes = max(1, (rem_seconds + 59) // 60)
+                        raise AuthenticationFailed({
+                            'detail': f"Account is temporarily locked due to {MAX_ATTEMPTS} failed attempts. Please try again in {rem_minutes} minute{'s' if rem_minutes > 1 else ''}.",
+                            'attempts_remaining': 0,
+                            'max_attempts': MAX_ATTEMPTS,
+                            'is_locked': True,
+                            'lockout_seconds': rem_seconds,
+                        })
+                    else:
+                        login_attempt.failed_attempts = 0
+                        login_attempt.locked_until = None
+                        login_attempt.save()
+            except AuthenticationFailed:
+                raise
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"LoginAttempt check error: {e}")
+
+        try:
+            data = super().validate(attrs)
+        except AuthenticationFailed:
+            if normalized_identifier:
+                try:
+                    if not login_attempt:
+                        login_attempt, _ = LoginAttempt.objects.get_or_create(identifier=normalized_identifier)
+
+                    login_attempt.failed_attempts += 1
+                    if login_attempt.failed_attempts >= MAX_ATTEMPTS:
+                        login_attempt.locked_until = now + timedelta(minutes=LOCKOUT_MINUTES)
+                        login_attempt.save()
+                        raise AuthenticationFailed({
+                            'detail': f"Too many failed login attempts ({MAX_ATTEMPTS}/{MAX_ATTEMPTS}). Your account has been temporarily locked for {LOCKOUT_MINUTES} minutes.",
+                            'attempts_remaining': 0,
+                            'max_attempts': MAX_ATTEMPTS,
+                            'is_locked': True,
+                            'lockout_seconds': LOCKOUT_MINUTES * 60,
+                        })
+                    else:
+                        remaining = MAX_ATTEMPTS - login_attempt.failed_attempts
+                        login_attempt.save()
+                        raise AuthenticationFailed({
+                            'detail': f"Invalid username or password. You have {remaining} attempt{'s' if remaining > 1 else ''} remaining.",
+                            'attempts_remaining': remaining,
+                            'max_attempts': MAX_ATTEMPTS,
+                            'is_locked': False,
+                        })
+                except AuthenticationFailed:
+                    raise
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(f"LoginAttempt record error: {e}")
+
+            raise AuthenticationFailed({
+                'detail': "Invalid username or password. Access denied.",
+                'attempts_remaining': 3,
+                'max_attempts': MAX_ATTEMPTS,
+                'is_locked': False,
+            })
+
+        # Successful login: reset failed attempts
+        if login_attempt:
+            try:
+                if login_attempt.failed_attempts > 0 or login_attempt.locked_until:
+                    login_attempt.failed_attempts = 0
+                    login_attempt.locked_until = None
+                    login_attempt.save()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"LoginAttempt reset error: {e}")
+
         roles = list(self.user.groups.values_list('name', flat=True))
         if self.user.is_superuser:
             roles.append('Admin')
@@ -327,6 +412,12 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+
+    def handle_exception(self, exc):
+        from rest_framework.exceptions import AuthenticationFailed
+        if isinstance(exc, AuthenticationFailed) and isinstance(exc.detail, dict) and exc.detail.get('is_locked'):
+            return Response(exc.detail, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        return super().handle_exception(exc)
 
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)

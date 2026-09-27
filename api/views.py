@@ -326,8 +326,8 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 attrs[self.username_field] = matched_user.username
                 normalized_identifier = matched_user.username.lower()
 
-        MAX_ATTEMPTS = 4
-        LOCKOUT_MINUTES = 15
+        MAX_ATTEMPTS = 5
+        LOCKOUT_MINUTES = 1
         now = timezone.now()
 
         login_attempt = None
@@ -337,9 +337,9 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 if login_attempt.locked_until:
                     if now < login_attempt.locked_until:
                         rem_seconds = int((login_attempt.locked_until - now).total_seconds())
-                        rem_minutes = max(1, (rem_seconds + 59) // 60)
+                        time_str = f"{rem_seconds} second{'s' if rem_seconds != 1 else ''}" if rem_seconds < 60 else f"{max(1, (rem_seconds + 59) // 60)} minute{'s' if rem_seconds >= 120 else ''}"
                         raise AuthenticationFailed({
-                            'detail': f"Account is temporarily locked due to {MAX_ATTEMPTS} failed attempts. Please try again in {rem_minutes} minute{'s' if rem_minutes > 1 else ''}.",
+                            'detail': f"Account is temporarily locked due to {MAX_ATTEMPTS} failed attempts. Please try again in {time_str}.",
                             'attempts_remaining': 0,
                             'max_attempts': MAX_ATTEMPTS,
                             'is_locked': True,
@@ -373,7 +373,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                         login_attempt.locked_until = now + timedelta(minutes=LOCKOUT_MINUTES)
                         login_attempt.save()
                         raise AuthenticationFailed({
-                            'detail': f"Too many failed login attempts ({MAX_ATTEMPTS}/{MAX_ATTEMPTS}). Your account has been temporarily locked for {LOCKOUT_MINUTES} minutes.",
+                            'detail': f"Too many failed login attempts ({MAX_ATTEMPTS}/{MAX_ATTEMPTS}). Your account has been temporarily locked for 1 minute.",
                             'attempts_remaining': 0,
                             'max_attempts': MAX_ATTEMPTS,
                             'is_locked': True,
@@ -401,7 +401,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
             raise AuthenticationFailed({
                 'detail': "Incorrect username or password. Please verify your credentials and try again.",
-                'attempts_remaining': 3,
+                'attempts_remaining': 4,
                 'max_attempts': MAX_ATTEMPTS,
                 'is_locked': False,
             })
@@ -435,8 +435,8 @@ class CustomTokenObtainPairView(TokenObtainPairView):
                 if 'no active account' in lower or 'given credentials' in lower:
                     exc.detail = {
                         'detail': "Incorrect username or password. Please verify your credentials and try again.",
-                        'attempts_remaining': 3,
-                        'max_attempts': 4,
+                        'attempts_remaining': 4,
+                        'max_attempts': 5,
                         'is_locked': False,
                     }
             elif isinstance(exc.detail, dict) and exc.detail.get('is_locked'):

@@ -923,6 +923,7 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(queue)
         return Response(serializer.data)
 
+from django.utils import timezone
 from .models import ClinicAdvisory
 from .serializers import ClinicAdvisorySerializer
 
@@ -931,26 +932,103 @@ class ClinicAdvisoryViewSet(viewsets.ModelViewSet):
     queryset = ClinicAdvisory.objects.all()
     serializer_class = ClinicAdvisorySerializer
 
+    @staticmethod
+    def _format_time_12(time_str):
+        if not time_str:
+            return ''
+        try:
+            parts = str(time_str).strip().split(':')
+            h = int(parts[0])
+            m = parts[1][:2] if len(parts) > 1 else '00'
+            ampm = 'PM' if h >= 12 else 'AM'
+            h12 = h % 12
+            if h12 == 0:
+                h12 = 12
+            return f"{h12}:{m} {ampm}"
+        except Exception:
+            return str(time_str)
+
+    def _evaluate_schedule(self, advisory):
+        if not getattr(advisory, 'auto_schedule', True):
+            return advisory
+
+        open_time = getattr(advisory, 'open_time', '08:00') or '08:00'
+        close_time = getattr(advisory, 'close_time', '17:00') or '17:00'
+
+        open_str = str(open_time)[:5]
+        close_str = str(close_time)[:5]
+
+        now_dt = timezone.localtime(timezone.now())
+        now_time_str = now_dt.strftime('%H:%M')
+
+        is_open = (open_str <= now_time_str < close_str)
+        is_half_day = (close_str <= '13:00')
+
+        formatted_open = self._format_time_12(open_str)
+        formatted_close = self._format_time_12(close_str)
+
+        if is_open:
+            new_status = 'Half Day' if is_half_day else 'Open'
+            if is_half_day:
+                new_msg = f"Welcome to the University Clinic! The clinic is OPEN today until {formatted_close} (Half Day)."
+            else:
+                new_msg = f"Welcome to the University Clinic! The clinic is OPEN. Standard operating hours are {formatted_open} to {formatted_close}."
+        else:
+            new_status = 'Closed'
+            if is_half_day:
+                new_msg = f"The University Clinic is currently CLOSED. Operating hours today were {formatted_open} to {formatted_close}."
+            else:
+                new_msg = f"The University Clinic is currently CLOSED. Standard operating hours are {formatted_open} to {formatted_close}."
+
+        if advisory.status != new_status or not advisory.message:
+            advisory.status = new_status
+            advisory.message = new_msg
+            advisory.save()
+
+        return advisory
+
     def list(self, request, *args, **kwargs):
         advisory = ClinicAdvisory.objects.first()
         if not advisory:
             advisory = ClinicAdvisory.objects.create(
                 status='Closed',
-                message='Welcome to the University Clinic! Standard operating hours are 8:00 AM to 5:00 PM.'
+                message='Welcome to the University Clinic! Standard operating hours are 8:00 AM to 5:00 PM.',
+                open_time='08:00',
+                close_time='17:00',
+                auto_schedule=True,
             )
+        advisory = self._evaluate_schedule(advisory)
         serializer = self.get_serializer(advisory)
         return Response(serializer.data)
 
     def create(self, request, *args, **kwargs):
-        status_val = request.data.get('status', 'Closed')
-        message_val = request.data.get('message', '')
+        status_val = request.data.get('status')
+        message_val = request.data.get('message')
+        open_time = request.data.get('open_time')
+        close_time = request.data.get('close_time')
+        auto_schedule = request.data.get('auto_schedule')
+
         advisory = ClinicAdvisory.objects.first()
-        if advisory:
+        if not advisory:
+            advisory = ClinicAdvisory()
+
+        if open_time is not None and hasattr(advisory, 'open_time'):
+            advisory.open_time = str(open_time)[:5]
+        if close_time is not None and hasattr(advisory, 'close_time'):
+            advisory.close_time = str(close_time)[:5]
+        if auto_schedule is not None and hasattr(advisory, 'auto_schedule'):
+            advisory.auto_schedule = bool(auto_schedule)
+
+        if status_val:
             advisory.status = status_val
+        if message_val is not None:
             advisory.message = message_val
-            advisory.save()
-        else:
-            advisory = ClinicAdvisory.objects.create(status=status_val, message=message_val)
+
+        advisory.save()
+
+        if getattr(advisory, 'auto_schedule', True) and not status_val:
+            advisory = self._evaluate_schedule(advisory)
+
         serializer = self.get_serializer(advisory)
         return Response(serializer.data, status=status.HTTP_200_OK)
 

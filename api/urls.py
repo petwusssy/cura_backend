@@ -35,5 +35,6 @@ urlpatterns = [
     path('auth/complete-profile/', views.CompleteProfileView.as_view(), name='complete_profile'),
     path('auth/verify-otp/', views.VerifyOTPView.as_view(), name='verify_otp'),
     path('auth/set-password/', views.SetPasswordView.as_view(), name='set_password'),
+    path('auth/change-password/', views.ChangePasswordView.as_view(), name='change_password'),
     path('', include(router.urls)),
 ]

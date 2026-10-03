@@ -288,6 +288,28 @@ class SetPasswordView(APIView):
         except OTPVerification.DoesNotExist:
             return Response({'error': 'Email not verified or session expired'}, status=400)
 
+class ChangePasswordView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = request.data.get('email', '').strip()
+        current_password = request.data.get('current_password')
+        new_password = request.data.get('new_password')
+
+        if not email or not new_password:
+            return Response({'error': 'Email and new password are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(email__iexact=email).first() or User.objects.filter(username__iexact=email).first()
+        if not user:
+            return Response({'error': 'User account not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if current_password and not user.check_password(current_password):
+            return Response({'error': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
+        user.save()
+        return Response({'success': True, 'message': 'Password updated successfully.'}, status=status.HTTP_200_OK)
+
 def health(request):
     return JsonResponse({
         "status": "ok",
@@ -515,6 +537,20 @@ class PatientViewSet(viewsets.ModelViewSet):
                 return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
 
         return super().create(request, *args, **kwargs)
+
+    @action(detail=False, methods=['patch', 'post'], url_path='update-by-email')
+    def update_by_email(self, request):
+        email = request.data.get('email', '').strip()
+        if not email:
+            return Response({'error': 'Email required'}, status=status.HTTP_400_BAD_REQUEST)
+        patient = Patient.objects.filter(email__iexact=email).first()
+        if not patient:
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = self.get_serializer(patient, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class ConsultationViewSet(viewsets.ModelViewSet):
     queryset = Consultation.objects.all()

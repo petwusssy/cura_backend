@@ -314,9 +314,6 @@ class ClinicAdvisory(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     status = models.CharField(max_length=50, default='Closed')
     message = models.TextField(default='Welcome to the University Clinic! Standard operating hours are 8:00 AM to 5:00 PM.')
-    open_time = models.CharField(max_length=10, default='08:00')
-    close_time = models.CharField(max_length=10, default='17:00')
-    auto_schedule = models.BooleanField(default=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):

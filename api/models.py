@@ -84,7 +84,6 @@ class Treatment(models.Model):
     timeGiven = models.TimeField()
     nextDose = models.TimeField(blank=True, null=True)
     remarks = models.TextField(blank=True, null=True)
-    status = models.CharField(max_length=50, default='active', blank=True, null=True)
 
 class MedicineItem(models.Model):
     STATUS_CHOICES = [

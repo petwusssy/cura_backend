@@ -386,8 +386,9 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             data = super().validate(attrs)
         except Exception as exc:
             # Re-raise if already an explicit lockout exception
-            if isinstance(exc, AuthenticationFailed) and isinstance(exc.detail, dict) and exc.detail.get('is_locked'):
-                raise
+            if isinstance(exc, AuthenticationFailed) and isinstance(exc.detail, dict):
+                if str(exc.detail.get('is_locked', '')).lower() in ('true', '1'):
+                    raise
 
             if normalized_identifier:
                 try:
@@ -460,17 +461,43 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     def handle_exception(self, exc):
         from rest_framework.exceptions import AuthenticationFailed
         if isinstance(exc, AuthenticationFailed):
-            if isinstance(exc.detail, str):
-                lower = exc.detail.lower()
-                if 'no active account' in lower or 'given credentials' in lower:
-                    exc.detail = {
-                        'detail': "Incorrect username or password. Please verify your credentials and try again.",
-                        'attempts_remaining': 4,
-                        'max_attempts': 5,
-                        'is_locked': False,
-                    }
-            elif isinstance(exc.detail, dict) and exc.detail.get('is_locked'):
-                return Response(exc.detail, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            if isinstance(exc.detail, dict):
+                raw_locked = str(exc.detail.get('is_locked', '')).lower()
+                is_locked = raw_locked in ('true', '1')
+
+                try:
+                    rem = int(exc.detail.get('attempts_remaining', 0))
+                except (ValueError, TypeError):
+                    rem = 0
+
+                try:
+                    max_att = int(exc.detail.get('max_attempts', 5))
+                except (ValueError, TypeError):
+                    max_att = 5
+
+                resp_payload = {
+                    'detail': str(exc.detail.get('detail', 'Incorrect username or password.')),
+                    'attempts_remaining': rem,
+                    'max_attempts': max_att,
+                    'is_locked': is_locked,
+                }
+                if 'lockout_seconds' in exc.detail:
+                    try:
+                        resp_payload['lockout_seconds'] = int(exc.detail['lockout_seconds'])
+                    except (ValueError, TypeError):
+                        pass
+
+                status_code = status.HTTP_429_TOO_MANY_REQUESTS if is_locked else status.HTTP_401_UNAUTHORIZED
+                return Response(resp_payload, status=status_code)
+
+            elif isinstance(exc.detail, str):
+                return Response({
+                    'detail': "Incorrect username or password. Please verify your credentials and try again.",
+                    'attempts_remaining': 4,
+                    'max_attempts': 5,
+                    'is_locked': False,
+                }, status=status.HTTP_401_UNAUTHORIZED)
+
         return super().handle_exception(exc)
 
     def post(self, request, *args, **kwargs):

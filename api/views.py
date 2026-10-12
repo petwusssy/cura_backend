@@ -371,6 +371,10 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                         login_attempt.failed_attempts = 0
                         login_attempt.locked_until = None
                         login_attempt.save()
+                elif login_attempt.failed_attempts > 0 and login_attempt.last_attempt_at:
+                    if (now - login_attempt.last_attempt_at) > timedelta(minutes=15):
+                        login_attempt.failed_attempts = 0
+                        login_attempt.save()
             except AuthenticationFailed:
                 raise
             except Exception as e:
@@ -390,6 +394,10 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                     if not login_attempt:
                         login_attempt, _ = LoginAttempt.objects.get_or_create(identifier=normalized_identifier)
 
+                    if login_attempt.failed_attempts > 0 and login_attempt.last_attempt_at:
+                        if (now - login_attempt.last_attempt_at) > timedelta(minutes=15):
+                            login_attempt.failed_attempts = 0
+
                     login_attempt.failed_attempts += 1
                     if login_attempt.failed_attempts >= MAX_ATTEMPTS:
                         login_attempt.locked_until = now + timedelta(minutes=LOCKOUT_MINUTES)
@@ -402,7 +410,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                             'lockout_seconds': LOCKOUT_MINUTES * 60,
                         })
                     else:
-                        remaining = MAX_ATTEMPTS - login_attempt.failed_attempts
+                        remaining = max(1, MAX_ATTEMPTS - login_attempt.failed_attempts)
                         login_attempt.save()
                         msg = (
                             "Incorrect username or password. Warning: You have only 1 attempt remaining before your account is temporarily locked."

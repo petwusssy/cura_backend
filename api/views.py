@@ -413,11 +413,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                     else:
                         remaining = max(1, MAX_ATTEMPTS - login_attempt.failed_attempts)
                         login_attempt.save()
-                        msg = (
-                            "Incorrect username or password. Warning: You have only 1 attempt remaining before your account is temporarily locked."
-                            if remaining == 1
-                            else f"Incorrect username or password. You have {remaining} attempts remaining."
-                        )
+                        msg = "Incorrect username or password. Please verify your credentials and try again."
                         raise AuthenticationFailed({
                             'detail': msg,
                             'attempts_remaining': remaining,

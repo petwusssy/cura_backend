@@ -361,7 +361,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                         rem_seconds = int((login_attempt.locked_until - now).total_seconds())
                         time_str = f"{rem_seconds} second{'s' if rem_seconds != 1 else ''}" if rem_seconds < 60 else f"{max(1, (rem_seconds + 59) // 60)} minute{'s' if rem_seconds >= 120 else ''}"
                         raise AuthenticationFailed({
-                            'detail': f"Account is temporarily locked due to {MAX_ATTEMPTS} failed attempts. Please try again in {time_str}.",
+                            'detail': "Account temporarily locked.",
                             'attempts_remaining': 0,
                             'max_attempts': MAX_ATTEMPTS,
                             'is_locked': True,
@@ -404,7 +404,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                         login_attempt.locked_until = now + timedelta(minutes=LOCKOUT_MINUTES)
                         login_attempt.save()
                         raise AuthenticationFailed({
-                            'detail': f"Too many failed login attempts ({MAX_ATTEMPTS}/{MAX_ATTEMPTS}). Your account has been temporarily locked for 1 minute.",
+                            'detail': "Account temporarily locked.",
                             'attempts_remaining': 0,
                             'max_attempts': MAX_ATTEMPTS,
                             'is_locked': True,

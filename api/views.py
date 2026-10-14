@@ -90,23 +90,89 @@ class GoogleLoginView(APIView):
 class CheckEmailView(APIView):
     permission_classes = [AllowAny]
     def post(self, request):
-        email = request.data.get('email')
+        email = request.data.get('email', '').strip()
         if not email:
             return Response({'error': 'Email is required'}, status=400)
-        exists = Patient.objects.filter(email=email).exists()
-        claimed = User.objects.filter(username=email).exists()
-        return Response({'exists': exists, 'claimed': claimed})
+        
+        patient = Patient.objects.filter(email__iexact=email).first()
+        claimed = User.objects.filter(username__iexact=email).exists() or User.objects.filter(email__iexact=email).exists()
+        
+        patient_data = None
+        missing_fields = []
+        if patient:
+            raw_bday = str(patient.birthday) if patient.birthday else ''
+            bday_valid = raw_bday and raw_bday != '2000-01-01'
+            raw_contact = patient.contact or ''
+            contact_valid = raw_contact and raw_contact != 'Not Provided'
+
+            patient_data = {
+                'id': patient.id,
+                'name': patient.name,
+                'category': patient.category,
+                'contact': raw_contact if contact_valid else '',
+                'birthday': raw_bday if bday_valid else '',
+                'age': patient.age or 0,
+                'sex': patient.sex or '',
+                'studentCategory': patient.studentCategory or '',
+                'gradeLevel': patient.gradeLevel or '',
+                'guardianName': patient.guardianName or '',
+                'course': patient.course or '',
+                'yearLevel': patient.yearLevel or '',
+                'position': patient.position or '',
+                'department': patient.department or '',
+                'address': patient.address or '',
+                'emergencyContact': patient.emergencyContact or '',
+                'emergencyPhone': patient.emergencyPhone or '',
+            }
+
+            if not contact_valid:
+                missing_fields.append('contact')
+            if not bday_valid:
+                missing_fields.append('birthday')
+            if not patient.sex:
+                missing_fields.append('sex')
+            if not patient.emergencyContact:
+                missing_fields.append('emergencyContact')
+            if not patient.emergencyPhone:
+                missing_fields.append('emergencyPhone')
+            if patient.category == 'Student':
+                if not patient.studentCategory:
+                    missing_fields.append('studentCategory')
+                if patient.studentCategory == 'College':
+                    if not patient.course:
+                        missing_fields.append('course')
+                    if not patient.yearLevel:
+                        missing_fields.append('yearLevel')
+                elif patient.studentCategory:
+                    if not patient.gradeLevel:
+                        missing_fields.append('gradeLevel')
+            elif patient.category == 'Employee':
+                if not patient.position:
+                    missing_fields.append('position')
+                if not patient.department:
+                    missing_fields.append('department')
+            elif patient.category == 'Outsider':
+                if not patient.address:
+                    missing_fields.append('address')
+
+        return Response({
+            'exists': bool(patient),
+            'claimed': claimed,
+            'patient': patient_data,
+            'missing_fields': missing_fields
+        })
 
 class RequestOTPView(APIView):
     permission_classes = [AllowAny]
     def post(self, request):
-        email = request.data.get('email')
+        email = request.data.get('email', '').strip().lower()
         if not email:
             return Response({'error': 'Email is required'}, status=400)
         
-        patient_exists = Patient.objects.filter(email=email).exists()
-        if not patient_exists:
-            return Response({'error': 'Patient not found'}, status=404)
+        patient_exists = Patient.objects.filter(email__iexact=email).exists()
+        user_exists = User.objects.filter(username__iexact=email).exists() or User.objects.filter(email__iexact=email).exists()
+        if not patient_exists and not user_exists:
+            return Response({'error': 'Patient record not found.'}, status=404)
         
         otp = str(random.randint(100000, 999999))
         OTPVerification.objects.update_or_create(
@@ -123,24 +189,55 @@ class RequestOTPView(APIView):
         print(f"OTP: {otp}")
         print(f"=======================\n")
         
-        return Response({'message': 'OTP sent successfully'})
+        return Response({'message': 'OTP sent successfully', 'otp': otp})
 
 class VerifyOTPView(APIView):
     permission_classes = [AllowAny]
     def post(self, request):
-        email = request.data.get('email')
-        otp = request.data.get('otp')
+        email = request.data.get('email', '').strip().lower()
+        otp = request.data.get('otp', '').strip()
         
         try:
-            verification = OTPVerification.objects.get(email=email, otp=otp)
+            verification = OTPVerification.objects.filter(email__iexact=email, otp=otp).latest('id')
             if timezone.now() > verification.expires_at:
                 return Response({'error': 'OTP expired'}, status=400)
             
             verification.is_verified = True
             verification.save()
-            return Response({'message': 'OTP verified'})
+
+            # Check if user already exists
+            user = User.objects.filter(username__iexact=email).first() or User.objects.filter(email__iexact=email).first()
+            patient = Patient.objects.filter(email__iexact=email).first()
+            patient_name = patient.name if patient else (user.first_name if user else email.split('@')[0])
+            patient_id = patient.id if patient else (user.username if user else '')
+
+            res_payload = {
+                'message': 'OTP verified',
+                'is_verified': True,
+                'claimed': bool(user),
+            }
+
+            if user:
+                refresh = RefreshToken.for_user(user)
+                refresh['username'] = user.username
+                refresh['roles'] = list(user.groups.values_list('name', flat=True))
+                if user.is_superuser:
+                    refresh['roles'].append('Admin')
+                res_payload.update({
+                    'refresh': str(refresh),
+                    'access': str(refresh.access_token),
+                    'user': {
+                        'id': patient_id,
+                        'email': user.email or email,
+                        'name': patient_name,
+                        'is_new': False,
+                    }
+                })
+
+            return Response(res_payload)
         except OTPVerification.DoesNotExist:
             return Response({'error': 'Invalid OTP'}, status=400)
+
 class RegisterView(APIView):
     permission_classes = [AllowAny]
     def post(self, request):
@@ -257,11 +354,11 @@ class CompleteProfileView(APIView):
 class SetPasswordView(APIView):
     permission_classes = [AllowAny]
     def post(self, request):
-        email = request.data.get('email')
+        email = request.data.get('email', '').strip().lower()
         password = request.data.get('password')
         
         try:
-            verification = OTPVerification.objects.get(email=email, is_verified=True)
+            verification = OTPVerification.objects.filter(email__iexact=email, is_verified=True).latest('id')
             if timezone.now() > verification.expires_at:
                 return Response({'error': 'Session expired'}, status=400)
             
@@ -277,12 +374,13 @@ class SetPasswordView(APIView):
             if user.is_superuser:
                 refresh['roles'].append('Admin')
 
-            patient = Patient.objects.filter(email=email).first()
+            patient = Patient.objects.filter(email__iexact=email).first()
             patient_name = patient.name if patient else email.split('@')[0]
+            patient_id = patient.id if patient else user.username
             return Response({
                 'refresh': str(refresh),
                 'access': str(refresh.access_token),
-                'user': {'email': user.email, 'name': patient_name, 'is_new': False}
+                'user': {'id': patient_id, 'email': user.email, 'name': patient_name, 'is_new': False}
             })
             
         except OTPVerification.DoesNotExist:

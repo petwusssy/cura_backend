@@ -73,7 +73,7 @@ class GoogleLoginView(APIView):
                             'details': f"OAuth verification failed: {e1}; Fallback failed: {e2}; Firebase token failed: {e3}"
                         }, status=status.HTTP_401_UNAUTHORIZED)
 
-            email = (idinfo.get('email') or '').strip().lower()
+            email = (idinfo.get('email') or request.data.get('email') or '').strip().lower()
             if not email:
                 return Response({'error': 'Email not found in authentication token'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -81,33 +81,72 @@ class GoogleLoginView(APIView):
             last_name = idinfo.get('family_name') or ''
             full_name = f"{first_name} {last_name}".strip()
             if not full_name:
-                full_name = (idinfo.get('name') or email.split('@')[0]).upper()
+                full_name = (idinfo.get('name') or request.data.get('name') or email.split('@')[0]).upper()
 
             # Determine category based on email domain
-            if email.endswith('.student@ua.edu.ph'):
+            if email.endswith('.student@ua.edu.ph') or email.endswith('@student.ua.edu.ph') or '.student@' in email:
                 category = 'Student'
             elif email.endswith('@ua.edu.ph'):
                 category = 'Employee'
             else:
                 category = 'Outsider'
 
-            # Get or create User
-            user, created = User.objects.get_or_create(username=email, defaults={
-                'email': email,
-                'first_name': first_name,
-                'last_name': last_name
-            })
-            if not created:
+            action = request.data.get('action') or request.data.get('mode') or 'login'
+
+            # Check existing records in clinic (Patient or User)
+            patient = Patient.objects.filter(email__iexact=email).first()
+            user = User.objects.filter(username__iexact=email).first() or User.objects.filter(email__iexact=email).first()
+
+            if action == 'register':
+                # Register mode from Create Account: prefill verified email and full name
+                if user:
+                    return Response({
+                        'error': 'An account with this Google email already exists. Please sign in.',
+                        'already_exists': True,
+                        'email': email,
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                return Response({
+                    'verified': True,
+                    'email': email,
+                    'name': full_name,
+                    'first_name': first_name,
+                    'last_name': last_name,
+                    'category': patient.category if patient else category,
+                    'patient_id': patient.id if patient else '',
+                    'exists_in_clinic': bool(patient),
+                }, status=status.HTTP_200_OK)
+
+            # Login mode:
+            if not patient and not user:
+                # Kapag WALA pang record sa clinic, HUWAG siyang i-auto create at HUWAG siyang i-log in.
+                return Response({
+                    'error': 'No clinic account found for this Google email. Please create an account first.',
+                    'not_found': True,
+                    'email': email,
+                    'name': full_name,
+                    'first_name': first_name,
+                    'last_name': last_name,
+                    'category': category,
+                }, status=status.HTTP_404_NOT_FOUND)
+
+            # Existing clinic account found -> proceed with login!
+            if not user:
+                user = User.objects.create_user(
+                    username=email,
+                    email=email,
+                    first_name=first_name or (patient.name if patient else full_name),
+                    last_name=last_name
+                )
+            else:
                 if not user.email:
                     user.email = email
-                if not user.first_name and first_name:
-                    user.first_name = first_name
+                if not user.first_name and (first_name or (patient and patient.name)):
+                    user.first_name = first_name or patient.name
                 if not user.last_name and last_name:
                     user.last_name = last_name
                 user.save()
 
-            # Get or create Patient profile
-            patient = Patient.objects.filter(email__iexact=email).first()
             if not patient:
                 patient = Patient.objects.create(
                     id=uuid.uuid4().hex[:8],
@@ -141,8 +180,8 @@ class GoogleLoginView(APIView):
                     'email': user.email,
                     'first_name': user.first_name or full_name,
                     'last_name': user.last_name,
-                    'name': full_name,
-                    'is_new': created,
+                    'name': patient.name if patient else full_name,
+                    'is_new': False,
                     'category': patient.category,
                     'patient_id': patient.id,
                 }
@@ -357,31 +396,42 @@ class RegisterView(APIView):
         if not email or not password:
             return Response({'error': 'Email and password are required'}, status=400)
             
-        if User.objects.filter(username=email).exists():
+        clean_email = email.strip().lower()
+        if User.objects.filter(username__iexact=clean_email).exists() or User.objects.filter(email__iexact=clean_email).exists():
             return Response({'error': 'User already exists'}, status=400)
             
         # Create User
-        user = User.objects.create_user(username=email, email=email, password=password)
+        user = User.objects.create_user(username=clean_email, email=clean_email, password=password)
         
         # Auto-infer category based on email
-        if email.endswith('.student@ua.edu.ph'):
+        if clean_email.endswith('.student@ua.edu.ph') or clean_email.endswith('@student.ua.edu.ph') or '.student@' in clean_email:
             category = 'Student'
-        elif email.endswith('@ua.edu.ph'):
+        elif clean_email.endswith('@ua.edu.ph'):
             category = 'Employee'
         else:
-            category = 'Outsider'
+            category = role or 'Outsider'
 
-        name_prefix = (email.split('@')[0] if '@' in email else email).upper()
+        name_prefix = (request.data.get('name') or (clean_email.split('@')[0] if '@' in clean_email else clean_email)).upper()
         
-        Patient.objects.create(
-            id=uuid.uuid4().hex[:8], # Short UUID for ID
-            name=name_prefix,
-            category=category,
-            contact='Not Provided',
-            birthday='2000-01-01', # Placeholder
-            age=0,
-            email=email
-        )
+        patient = Patient.objects.filter(email__iexact=clean_email).first()
+        if not patient:
+            patient = Patient.objects.create(
+                id=request.data.get('id_number') or uuid.uuid4().hex[:8],
+                name=name_prefix,
+                category=category,
+                contact='Not Provided',
+                birthday='2000-01-01',
+                age=0,
+                email=clean_email
+            )
+        else:
+            if name_prefix and (patient.name == 'Not Provided' or not patient.name):
+                patient.name = name_prefix
+            if category:
+                patient.category = category
+            if request.data.get('id_number'):
+                patient.id = request.data.get('id_number')
+            patient.save()
         
         # Return JWT token
         refresh = RefreshToken.for_user(user)

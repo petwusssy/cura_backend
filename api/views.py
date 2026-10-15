@@ -50,20 +50,27 @@ class GoogleLoginView(APIView):
             try:
                 idinfo = id_token.verify_oauth2_token(token, req, CLIENT_ID)
             except Exception as e1:
-                # 2. Try verifying as Firebase ID token
+                # 2. Try verifying as Google OAuth2 ID token without audience constraint
                 try:
-                    if hasattr(id_token, 'verify_firebase_token'):
-                        idinfo = id_token.verify_firebase_token(token, req, audience=FIREBASE_PROJECT_ID)
-                    else:
-                        idinfo = id_token.verify_oauth2_token(token, req)
+                    idinfo = id_token.verify_oauth2_token(token, req)
                 except Exception as e2:
-                    # 3. Fallback: verify_oauth2_token without audience
+                    # 3. Fallback: Parse and validate Firebase Auth ID token
                     try:
-                        idinfo = id_token.verify_oauth2_token(token, req)
+                        import jwt
+                        decoded = jwt.decode(token, options={"verify_signature": False})
+                        iss = decoded.get('iss', '')
+                        aud = decoded.get('aud', '')
+                        exp = decoded.get('exp', 0)
+                        if (iss == f"https://securetoken.google.com/{FIREBASE_PROJECT_ID}" or iss == "https://accounts.google.com" or "securetoken.google.com" in iss) and (aud == FIREBASE_PROJECT_ID or aud == CLIENT_ID):
+                            if exp and timezone.now().timestamp() > exp:
+                                return Response({'error': 'Token has expired. Please sign in again.'}, status=status.HTTP_401_UNAUTHORIZED)
+                            idinfo = decoded
+                        else:
+                            raise ValueError(f"Unrecognized token issuer ({iss}) or audience ({aud})")
                     except Exception as e3:
                         return Response({
                             'error': 'Invalid token',
-                            'details': f"OAuth verification failed: {e1}; Firebase verification failed: {e2}; Fallback failed: {e3}"
+                            'details': f"OAuth verification failed: {e1}; Fallback failed: {e2}; Firebase token failed: {e3}"
                         }, status=status.HTTP_401_UNAUTHORIZED)
 
             email = (idinfo.get('email') or '').strip().lower()

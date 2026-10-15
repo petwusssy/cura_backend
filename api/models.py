@@ -27,6 +27,7 @@ class Patient(models.Model):
     studentCategory = models.CharField(max_length=50, blank=True, null=True)
     guardianName = models.CharField(max_length=255, blank=True, null=True)
     gradeLevel = models.CharField(max_length=50, blank=True, null=True)
+    avatar = models.TextField(blank=True, null=True)
 
     def save(self, *args, **kwargs):
         if self.name:

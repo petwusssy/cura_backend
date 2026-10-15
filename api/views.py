@@ -264,6 +264,7 @@ class CheckEmailView(APIView):
                 'address': patient.address or '',
                 'emergencyContact': patient.emergencyContact or '',
                 'emergencyPhone': patient.emergencyPhone or '',
+                'avatar': patient.avatar or '',
             }
 
             if not contact_valid:

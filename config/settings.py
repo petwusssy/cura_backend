@@ -140,9 +140,19 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = True
 
-CORS_ALLOWED_ORIGINS = [origin.strip() for origin in config('CORS_ALLOWED_ORIGINS', default='http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,https://cura-bice.vercel.app').split(',')]
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in config(
+        'CORS_ALLOWED_ORIGINS',
+        default='http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://localhost:19006,https://cura-bice.vercel.app,https://curamobile.vercel.app'
+    ).split(',')
+    if origin.strip()
+]
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https:\/\/.*\.vercel\.app$",
+    r"^http:\/\/localhost:\d+$",
+    r"^http:\/\/127\.0\.0\.1:\d+$",
+    r"^http:\/\/192\.168\.\d+\.\d+:\d+$",
 ]
 
 REST_FRAMEWORK = {

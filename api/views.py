@@ -40,51 +40,109 @@ class GoogleLoginView(APIView):
         
         try:
             # Specify the CLIENT_ID of the app that accesses the backend:
-            # Using the web client ID provided by the user
             CLIENT_ID = "289437991360-4ge9cgmpvjmr68pfprsvfimau1i4batr.apps.googleusercontent.com"
-            idinfo = id_token.verify_oauth2_token(token, requests.Request(), CLIENT_ID)
+            FIREBASE_PROJECT_ID = "cura-clinic-65b94"
+            
+            idinfo = None
+            req = requests.Request()
 
-            # ID token is valid. Get the user's email from the decoded token.
-            email = idinfo.get('email')
-            first_name = idinfo.get('given_name', '')
-            last_name = idinfo.get('family_name', '')
+            # 1. Try verifying as Google OAuth2 ID token
+            try:
+                idinfo = id_token.verify_oauth2_token(token, req, CLIENT_ID)
+            except Exception as e1:
+                # 2. Try verifying as Firebase ID token
+                try:
+                    if hasattr(id_token, 'verify_firebase_token'):
+                        idinfo = id_token.verify_firebase_token(token, req, audience=FIREBASE_PROJECT_ID)
+                    else:
+                        idinfo = id_token.verify_oauth2_token(token, req)
+                except Exception as e2:
+                    # 3. Fallback: verify_oauth2_token without audience
+                    try:
+                        idinfo = id_token.verify_oauth2_token(token, req)
+                    except Exception as e3:
+                        return Response({
+                            'error': 'Invalid token',
+                            'details': f"OAuth verification failed: {e1}; Firebase verification failed: {e2}; Fallback failed: {e3}"
+                        }, status=status.HTTP_401_UNAUTHORIZED)
 
-            # Check if user exists, if not create one
+            email = (idinfo.get('email') or '').strip().lower()
+            if not email:
+                return Response({'error': 'Email not found in authentication token'}, status=status.HTTP_400_BAD_REQUEST)
+
+            first_name = idinfo.get('given_name') or ''
+            last_name = idinfo.get('family_name') or ''
+            full_name = f"{first_name} {last_name}".strip()
+            if not full_name:
+                full_name = (idinfo.get('name') or email.split('@')[0]).upper()
+
+            # Determine category based on email domain
+            if email.endswith('.student@ua.edu.ph'):
+                category = 'Student'
+            elif email.endswith('@ua.edu.ph'):
+                category = 'Employee'
+            else:
+                category = 'Outsider'
+
+            # Get or create User
             user, created = User.objects.get_or_create(username=email, defaults={
                 'email': email,
                 'first_name': first_name,
                 'last_name': last_name
             })
+            if not created:
+                if not user.email:
+                    user.email = email
+                if not user.first_name and first_name:
+                    user.first_name = first_name
+                if not user.last_name and last_name:
+                    user.last_name = last_name
+                user.save()
 
-            # Check if Patient profile exists, if not create one
-            patient, patient_created = Patient.objects.get_or_create(email=email, defaults={
-                'firstName': first_name,
-                'lastName': last_name,
-                'contactNumber': '',
-                'classification': 'Outsider'
-            })
+            # Get or create Patient profile
+            patient = Patient.objects.filter(email__iexact=email).first()
+            if not patient:
+                patient = Patient.objects.create(
+                    id=uuid.uuid4().hex[:8],
+                    name=full_name,
+                    category=category,
+                    contact='Not Provided',
+                    birthday='2000-01-01',
+                    age=0,
+                    email=email
+                )
+            else:
+                # Update category if upgraded (e.g. from Outsider to Student/Employee)
+                if patient.category == 'Outsider' and category in ['Student', 'Employee']:
+                    patient.category = category
+                    patient.save()
 
             # Generate JWT tokens for the user
             refresh = RefreshToken.for_user(user)
             refresh['username'] = user.username
-            refresh['roles'] = list(user.groups.values_list('name', flat=True))
+            roles = list(user.groups.values_list('name', flat=True))
             if user.is_superuser:
-                refresh['roles'].append('Admin')
+                roles.append('Admin')
+            refresh['roles'] = roles
 
             return Response({
                 'refresh': str(refresh),
                 'access': str(refresh.access_token),
+                'roles': roles,
+                'username': user.username,
                 'user': {
                     'email': user.email,
-                    'first_name': user.first_name,
+                    'first_name': user.first_name or full_name,
                     'last_name': user.last_name,
-                    'is_new': created
+                    'name': full_name,
+                    'is_new': created,
+                    'category': patient.category,
+                    'patient_id': patient.id,
                 }
             }, status=status.HTTP_200_OK)
 
-        except ValueError as e:
-            # Invalid token
-            return Response({'error': 'Invalid token', 'details': str(e)}, status=status.HTTP_401_UNAUTHORIZED)
+        except Exception as e:
+            return Response({'error': 'Google authentication failed', 'details': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class CheckEmailView(APIView):

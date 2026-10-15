@@ -161,3 +161,12 @@ SIMPLE_JWT = {
     'AUTH_COOKIE_PATH': '/',
     'AUTH_COOKIE_SAMESITE': config('AUTH_COOKIE_SAMESITE', default='None'),
 }
+
+# Email Configuration (Gmail SMTP)
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='curaclinic.ua@gmail.com')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='euueyvclnpbjjfpi')
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='CURA Clinic <curaclinic.ua@gmail.com>')

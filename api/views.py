@@ -1198,6 +1198,32 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(appointment)
         return Response(serializer.data)
 
+    @action(detail=False, methods=['get', 'post'], permission_classes=[])
+    def availability(self, request):
+        import json
+        from .models import AppointmentAvailability
+        try:
+            record = AppointmentAvailability.objects.first()
+            if not record:
+                record = AppointmentAvailability.objects.create(unavailable_dates='[]')
+        except Exception:
+            return Response({'unavailable_dates': []})
+
+        if request.method == 'POST':
+            dates = request.data.get('unavailable_dates', [])
+            if not isinstance(dates, list):
+                dates = []
+            record.unavailable_dates = json.dumps(dates)
+            record.save()
+            return Response({'status': 'success', 'unavailable_dates': dates})
+
+        try:
+            dates = json.loads(record.unavailable_dates) if record.unavailable_dates else []
+        except Exception:
+            dates = []
+        return Response({'unavailable_dates': dates})
+
+
 from .models import PatientQueue
 from .serializers import PatientQueueSerializer
 from django.db import transaction

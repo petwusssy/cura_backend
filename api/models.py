@@ -304,6 +304,15 @@ class AppointmentRequest(models.Model):
     def __str__(self):
         return f"Appointment - {self.patient.name} ({self.status})"
 
+class AppointmentAvailability(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    unavailable_dates = models.TextField(default='[]', blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"AppointmentAvailability ({self.updated_at})"
+
+
 class PatientQueue(models.Model):
     STATUS_CHOICES = [
         ('waiting', 'waiting'),

@@ -1107,23 +1107,33 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
         try:
             record = TelemedicineAvailability.objects.first()
             if not record:
-                record = TelemedicineAvailability.objects.create(unavailable_dates='[]')
+                record = TelemedicineAvailability.objects.create(unavailable_dates='[]', unavailable_times='[]')
         except Exception:
-            return Response({'unavailable_dates': []})
+            return Response({'unavailable_dates': [], 'unavailable_times': []})
 
         if request.method == 'POST':
             dates = request.data.get('unavailable_dates', [])
+            times = request.data.get('unavailable_times', [])
             if not isinstance(dates, list):
                 dates = []
+            if not isinstance(times, list):
+                times = []
             record.unavailable_dates = json.dumps(dates)
+            if hasattr(record, 'unavailable_times'):
+                record.unavailable_times = json.dumps(times)
             record.save()
-            return Response({'status': 'success', 'unavailable_dates': dates})
+            return Response({'status': 'success', 'unavailable_dates': dates, 'unavailable_times': times})
 
         try:
             dates = json.loads(record.unavailable_dates) if record.unavailable_dates else []
         except Exception:
             dates = []
-        return Response({'unavailable_dates': dates})
+        try:
+            times = json.loads(record.unavailable_times) if hasattr(record, 'unavailable_times') and record.unavailable_times else []
+        except Exception:
+            times = []
+        return Response({'unavailable_dates': dates, 'unavailable_times': times})
+
 
 
 from .models import AppointmentRequest
@@ -1205,23 +1215,33 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
         try:
             record = AppointmentAvailability.objects.first()
             if not record:
-                record = AppointmentAvailability.objects.create(unavailable_dates='[]')
+                record = AppointmentAvailability.objects.create(unavailable_dates='[]', unavailable_times='[]')
         except Exception:
-            return Response({'unavailable_dates': []})
+            return Response({'unavailable_dates': [], 'unavailable_times': []})
 
         if request.method == 'POST':
             dates = request.data.get('unavailable_dates', [])
+            times = request.data.get('unavailable_times', [])
             if not isinstance(dates, list):
                 dates = []
+            if not isinstance(times, list):
+                times = []
             record.unavailable_dates = json.dumps(dates)
+            if hasattr(record, 'unavailable_times'):
+                record.unavailable_times = json.dumps(times)
             record.save()
-            return Response({'status': 'success', 'unavailable_dates': dates})
+            return Response({'status': 'success', 'unavailable_dates': dates, 'unavailable_times': times})
 
         try:
             dates = json.loads(record.unavailable_dates) if record.unavailable_dates else []
         except Exception:
             dates = []
-        return Response({'unavailable_dates': dates})
+        try:
+            times = json.loads(record.unavailable_times) if hasattr(record, 'unavailable_times') and record.unavailable_times else []
+        except Exception:
+            times = []
+        return Response({'unavailable_dates': dates, 'unavailable_times': times})
+
 
 
 from .models import PatientQueue

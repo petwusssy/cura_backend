@@ -91,37 +91,54 @@ class GoogleLoginView(APIView):
             else:
                 category = 'Outsider'
 
-            action = request.data.get('action') or request.data.get('mode') or 'login'
+            action = request.data.get('action') or request.data.get('mode') or 'signin'
 
             # Check existing records in clinic (Patient or User)
             patient = Patient.objects.filter(email__iexact=email).first()
             user = User.objects.filter(username__iexact=email).first() or User.objects.filter(email__iexact=email).first()
 
-            if action == 'register':
-                # Register mode from Create Account: prefill verified email and full name
+            # Case B: User is attempting to Register / Create Account
+            if action in ['register', 'create_account']:
                 if user:
                     return Response({
-                        'error': 'An account with this Google email already exists. Please sign in.',
+                        'error': 'This Google account is already registered. Please sign in.',
+                        'code': 'ACCOUNT_ALREADY_EXISTS',
                         'already_exists': True,
                         'email': email,
+                        'name': full_name,
+                        'category': category,
                     }, status=status.HTTP_400_BAD_REQUEST)
+                else:
+                    patient_data = None
+                    if patient:
+                        patient_data = {
+                            'id': patient.id,
+                            'name': patient.name,
+                            'category': patient.category,
+                            'studentId': getattr(patient, 'studentId', '') or patient.id,
+                            'course': getattr(patient, 'course', ''),
+                            'yearLevel': getattr(patient, 'yearLevel', ''),
+                        }
+                    return Response({
+                        'message': 'Google account verified. Please complete your registration form.',
+                        'verified': True,
+                        'is_new': True,
+                        'email': email,
+                        'name': full_name,
+                        'first_name': first_name,
+                        'last_name': last_name,
+                        'category': patient.category if patient else category,
+                        'patient_id': patient.id if patient else '',
+                        'exists_in_clinic': bool(patient),
+                        'patient': patient_data
+                    }, status=status.HTTP_200_OK)
 
+            # Case A: User is attempting to Sign In
+            if not user:
+                # If there is no registered user account, DO NOT auto-create and DO NOT log in.
                 return Response({
-                    'verified': True,
-                    'email': email,
-                    'name': full_name,
-                    'first_name': first_name,
-                    'last_name': last_name,
-                    'category': patient.category if patient else category,
-                    'patient_id': patient.id if patient else '',
-                    'exists_in_clinic': bool(patient),
-                }, status=status.HTTP_200_OK)
-
-            # Login mode:
-            if not patient and not user:
-                # Kapag WALA pang record sa clinic, HUWAG siyang i-auto create at HUWAG siyang i-log in.
-                return Response({
-                    'error': 'No clinic account found for this Google email. Please create an account first.',
+                    'error': 'No account found for this Google account. Please create an account first.',
+                    'code': 'ACCOUNT_NOT_FOUND',
                     'not_found': True,
                     'email': email,
                     'name': full_name,
@@ -130,22 +147,14 @@ class GoogleLoginView(APIView):
                     'category': category,
                 }, status=status.HTTP_404_NOT_FOUND)
 
-            # Existing clinic account found -> proceed with login!
-            if not user:
-                user = User.objects.create_user(
-                    username=email,
-                    email=email,
-                    first_name=first_name or (patient.name if patient else full_name),
-                    last_name=last_name
-                )
-            else:
-                if not user.email:
-                    user.email = email
-                if not user.first_name and (first_name or (patient and patient.name)):
-                    user.first_name = first_name or patient.name
-                if not user.last_name and last_name:
-                    user.last_name = last_name
-                user.save()
+            # If registered user exists (for sign in flow):
+            if not user.email:
+                user.email = email
+            if not user.first_name and (first_name or (patient and patient.name)):
+                user.first_name = first_name or patient.name
+            if not user.last_name and last_name:
+                user.last_name = last_name
+            user.save()
 
             if not patient:
                 patient = Patient.objects.create(

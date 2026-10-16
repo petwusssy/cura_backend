@@ -158,6 +158,11 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^http:\/\/192\.168\.\d+\.\d+:\d+$",
 ]
 
+from corsheaders.defaults import default_headers
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    'cache-control',
+]
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',

@@ -914,7 +914,7 @@ class StockHistoryViewSet(viewsets.ModelViewSet):
     # permission_classes = [IsAuthenticated]
 
 class PurchaseRequestViewSet(viewsets.ModelViewSet):
-    queryset = PurchaseRequest.objects.all()
+    queryset = PurchaseRequest.objects.prefetch_related('history').all()
     serializer_class = PurchaseRequestSerializer
     # permission_classes = [IsAuthenticated]
 

@@ -850,7 +850,7 @@ class PatientViewSet(viewsets.ModelViewSet):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class ConsultationViewSet(viewsets.ModelViewSet):
-    queryset = Consultation.objects.select_related('patient').prefetch_related('treatments').all()
+    queryset = Consultation.objects.all()
     serializer_class = ConsultationSerializer
     # permission_classes = [IsAuthenticated]
 
@@ -908,7 +908,7 @@ class PurchaseHistoryViewSet(viewsets.ModelViewSet):
     # permission_classes = [IsAuthenticated]
 
 class MedicalCertificateViewSet(viewsets.ModelViewSet):
-    queryset = MedicalCertificate.objects.select_related('patient').all()
+    queryset = MedicalCertificate.objects.all()
     serializer_class = MedicalCertificateSerializer
     # permission_classes = [IsAuthenticated]
 

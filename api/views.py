@@ -989,7 +989,7 @@ from .models import TelemedicineRequest
 from .serializers import TelemedicineRequestSerializer
 
 class TelemedicineRequestViewSet(viewsets.ModelViewSet):
-    queryset = TelemedicineRequest.objects.all().order_by('-created_at')
+    queryset = TelemedicineRequest.objects.select_related('patient').all().order_by('-created_at')
     serializer_class = TelemedicineRequestSerializer
     # permission_classes = [IsAuthenticated]
 
@@ -1110,7 +1110,7 @@ from .models import AppointmentRequest
 from .serializers import AppointmentRequestSerializer
 
 class AppointmentRequestViewSet(viewsets.ModelViewSet):
-    queryset = AppointmentRequest.objects.all().order_by('-created_at')
+    queryset = AppointmentRequest.objects.select_related('patient').all().order_by('-created_at')
     serializer_class = AppointmentRequestSerializer
     # permission_classes = [IsAuthenticated]
 
@@ -1224,10 +1224,10 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         req_date = self.request.query_params.get('date')
         if self.request.query_params.get('all') == 'true':
-            return PatientQueue.objects.all().order_by('queue_number')
+            return PatientQueue.objects.select_related('patient').all().order_by('queue_number')
         if req_date:
-            return PatientQueue.objects.filter(date=req_date).order_by('queue_number')
-        return PatientQueue.objects.filter(date=timezone.localdate()).order_by('queue_number')
+            return PatientQueue.objects.select_related('patient').filter(date=req_date).order_by('queue_number')
+        return PatientQueue.objects.select_related('patient').filter(date=timezone.localdate()).order_by('queue_number')
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
@@ -1333,7 +1333,7 @@ from .models import MedicalCertificateRequest
 from .serializers import MedicalCertificateRequestSerializer
 
 class MedicalCertificateRequestViewSet(viewsets.ModelViewSet):
-    queryset = MedicalCertificateRequest.objects.all().order_by('-created_at')
+    queryset = MedicalCertificateRequest.objects.select_related('patient').all().order_by('-created_at')
     serializer_class = MedicalCertificateRequestSerializer
 
     def create(self, request, *args, **kwargs):

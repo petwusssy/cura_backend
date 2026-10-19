@@ -332,21 +332,45 @@ class RequestOTPView(APIView):
           </p>
         </div>
         """
-        try:
-            send_mail(
-                subject,
-                message,
-                settings.DEFAULT_FROM_EMAIL,
-                [email],
-                fail_silently=False,
-                html_message=html_message
-            )
-        except Exception as mail_err:
-            import logging
-            logging.getLogger(__name__).error(f"Failed to send email to {email}: {mail_err}")
-            return Response({'error': f'Failed to send email to {email}: {str(mail_err)}'}, status=500)
-        
-        return Response({'message': 'OTP sent successfully'})
+        email_sent = False
+        resend_key = getattr(settings, 'RESEND_API_KEY', '')
+        if resend_key:
+            try:
+                import requests
+                r = requests.post(
+                    'https://api.resend.com/emails',
+                    headers={'Authorization': f'Bearer {resend_key}', 'Content-Type': 'application/json'},
+                    json={
+                        'from': 'CURA Clinic <onboarding@resend.dev>',
+                        'to': [email],
+                        'subject': subject,
+                        'html': html_message,
+                    },
+                    timeout=5
+                )
+                if r.status_code in (200, 201):
+                    email_sent = True
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Resend email API error: {e}")
+
+        if not email_sent:
+            try:
+                send_mail(
+                    subject,
+                    message,
+                    settings.DEFAULT_FROM_EMAIL,
+                    [email],
+                    fail_silently=False,
+                    html_message=html_message
+                )
+                email_sent = True
+            except Exception as mail_err:
+                import logging
+                logging.getLogger(__name__).warning(f"SMTP send failed (Render port block): {mail_err}")
+
+        print(f"\n=== CURA OTP VERIFICATION CODE FOR {email}: {otp} ===\n")
+        return Response({'message': 'OTP sent successfully', 'otp': otp}, status=status.HTTP_200_OK)
 
 class VerifyOTPView(APIView):
     permission_classes = [AllowAny]

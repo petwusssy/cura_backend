@@ -392,7 +392,7 @@ class RequestOTPView(APIView):
                 logging.getLogger(__name__).warning(f"SMTP send failed (Render port block): {mail_err}")
 
         print(f"\n=== CURA OTP VERIFICATION CODE FOR {email}: {otp} ===\n")
-        return Response({'message': 'OTP sent successfully', 'otp': otp}, status=status.HTTP_200_OK)
+        return Response({'message': 'OTP sent successfully'}, status=status.HTTP_200_OK)
 
 class VerifyOTPView(APIView):
     permission_classes = [AllowAny]

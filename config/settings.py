@@ -90,7 +90,7 @@ DATABASES = {
     'default': config(
         'DATABASE_URL',
         default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
-        cast=lambda url: dj_database_url.parse(url, conn_max_age=0)
+        cast=lambda url: dj_database_url.parse(url, conn_max_age=60)
     )
 }
 

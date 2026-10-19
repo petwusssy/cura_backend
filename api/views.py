@@ -12,6 +12,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.decorators import action
 from google.oauth2 import id_token
 from google.auth.transport import requests
+from django.db.models import Exists, OuterRef
 
 from .models import (
     Patient, Consultation, Treatment, MedicineItem, StockHistory,
@@ -876,7 +877,11 @@ class PatientViewSet(viewsets.ModelViewSet):
     # permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = Patient.objects.all()
+        qs = Patient.objects.annotate(
+            is_claimed=Exists(User.objects.filter(username__iexact=OuterRef('email')))
+        )
+        if self.action == 'list':
+            qs = qs.defer('avatar')
         email = self.request.query_params.get('email')
         if email:
             return qs.filter(email__iexact=email.strip())
@@ -911,11 +916,13 @@ class PatientViewSet(viewsets.ModelViewSet):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class ConsultationViewSet(viewsets.ModelViewSet):
-    queryset = Consultation.objects.all()
+    queryset = Consultation.objects.prefetch_related('treatments').all()
     serializer_class = ConsultationSerializer
 
     def get_queryset(self):
-        qs = Consultation.objects.all()
+        qs = Consultation.objects.prefetch_related('treatments')
+        if self.action == 'list':
+            qs = qs.defer('prescriptionImage', 'fetcherIdImage')
         patient_id = self.request.query_params.get('patient')
         if patient_id:
             return qs.filter(patient_id=patient_id)
@@ -956,7 +963,7 @@ class TreatmentViewSet(viewsets.ModelViewSet):
     # permission_classes = [IsAuthenticated]
 
 class MedicineItemViewSet(viewsets.ModelViewSet):
-    queryset = MedicineItem.objects.all()
+    queryset = MedicineItem.objects.prefetch_related('stockHistory').all()
     serializer_class = MedicineItemSerializer
     # permission_classes = [IsAuthenticated]
 
@@ -987,9 +994,16 @@ class PurchaseHistoryViewSet(viewsets.ModelViewSet):
     # permission_classes = [IsAuthenticated]
 
 class MedicalCertificateViewSet(viewsets.ModelViewSet):
-    queryset = MedicalCertificate.objects.all()
+    queryset = MedicalCertificate.objects.select_related('patient').all()
     serializer_class = MedicalCertificateSerializer
     # permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = MedicalCertificate.objects.select_related('patient').all()
+        patient_id = self.request.query_params.get('patient')
+        if patient_id:
+            return qs.filter(patient_id=patient_id)
+        return qs
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -1029,7 +1043,7 @@ class MedicalCertificateViewSet(viewsets.ModelViewSet):
             print("Certificate notification note:", e)
 
 class BedViewSet(viewsets.ModelViewSet):
-    queryset = Bed.objects.all().order_by('bedNumber')
+    queryset = Bed.objects.prefetch_related('history').all().order_by('bedNumber')
     serializer_class = BedSerializer
     # permission_classes = [IsAuthenticated]
 

@@ -15,9 +15,11 @@ class PatientSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
     def get_isClaimed(self, obj):
+        if hasattr(obj, 'is_claimed'):
+            return bool(obj.is_claimed)
         if not obj.email:
             return False
-        return User.objects.filter(username=obj.email).exists()
+        return User.objects.filter(username__iexact=obj.email.strip()).exists()
 
     def validate_name(self, value):
         return value.strip().upper() if value else value
@@ -85,8 +87,9 @@ class MedicineItemSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
+        # Use prefetched in-memory records to prevent N+1 SQL queries
         history_dispensed = sum(
-            h.qty for h in instance.stockHistory.filter(type='dispense')
+            h.qty for h in instance.stockHistory.all() if getattr(h, 'type', None) == 'dispense'
         )
         if (ret.get('dispensed') or 0) < history_dispensed:
             ret['dispensed'] = history_dispensed

@@ -960,6 +960,17 @@ class MedicineItemViewSet(viewsets.ModelViewSet):
     serializer_class = MedicineItemSerializer
     # permission_classes = [IsAuthenticated]
 
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        name = serializer.validated_data.get('name', '').strip()
+        if name:
+            existing = MedicineItem.objects.filter(name__iexact=name).first()
+            if existing:
+                return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+        return super().create(request, *args, **kwargs)
+
 class StockHistoryViewSet(viewsets.ModelViewSet):
     queryset = StockHistory.objects.all()
     serializer_class = StockHistorySerializer

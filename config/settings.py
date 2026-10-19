@@ -186,8 +186,11 @@ EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
 EMAIL_TIMEOUT = 5
+BREVO_API_KEY = config('BREVO_API_KEY', default='')
+BREVO_SENDER_EMAIL = config('BREVO_SENDER_EMAIL', default='curaclinic.ua@gmail.com')
 RESEND_API_KEY = config('RESEND_API_KEY', default='')
 EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='curaclinic.ua@gmail.com')
 EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='euueyvclnpbjjfpi')
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='CURA Clinic <curaclinic.ua@gmail.com>')
+
 

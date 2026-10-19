@@ -333,8 +333,30 @@ class RequestOTPView(APIView):
         </div>
         """
         email_sent = False
+        brevo_key = getattr(settings, 'BREVO_API_KEY', '')
+        if brevo_key:
+            try:
+                import requests
+                sender_email = getattr(settings, 'BREVO_SENDER_EMAIL', 'curaclinic.ua@gmail.com')
+                r = requests.post(
+                    'https://api.brevo.com/v3/smtp/email',
+                    headers={'api-key': brevo_key, 'Content-Type': 'application/json'},
+                    json={
+                        'sender': {'name': 'CURA Clinic', 'email': sender_email},
+                        'to': [{'email': email}],
+                        'subject': subject,
+                        'htmlContent': html_message,
+                    },
+                    timeout=5
+                )
+                if r.status_code in (200, 201):
+                    email_sent = True
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Brevo email API error: {e}")
+
         resend_key = getattr(settings, 'RESEND_API_KEY', '')
-        if resend_key:
+        if not email_sent and resend_key:
             try:
                 import requests
                 r = requests.post(

@@ -86,11 +86,17 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
+def _parse_database_url(url):
+    parsed = dj_database_url.parse(url, conn_max_age=60)
+    if parsed and not parsed.get('NAME'):
+        parsed['NAME'] = 'postgres'
+    return parsed
+
 DATABASES = {
     'default': config(
         'DATABASE_URL',
         default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
-        cast=lambda url: dj_database_url.parse(url, conn_max_age=60)
+        cast=_parse_database_url
     )
 }
 

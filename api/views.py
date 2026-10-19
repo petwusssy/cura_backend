@@ -761,6 +761,14 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             roles.append('Admin')
         data['roles'] = roles
         data['username'] = self.user.username
+
+        patient = Patient.objects.filter(email__iexact=self.user.email).first() or Patient.objects.filter(id__iexact=self.user.username).first()
+        data['user'] = {
+            'id': patient.id if patient else self.user.username,
+            'name': patient.name if patient else (self.user.first_name or self.user.username),
+            'email': self.user.email or self.user.username,
+            'category': patient.category if patient else 'Outsider'
+        }
         return data
 
 class CustomTokenObtainPairView(TokenObtainPairView):
@@ -867,6 +875,13 @@ class PatientViewSet(viewsets.ModelViewSet):
     serializer_class = PatientSerializer
     # permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        qs = Patient.objects.all()
+        email = self.request.query_params.get('email')
+        if email:
+            return qs.filter(email__iexact=email.strip())
+        return qs
+
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         if not serializer.is_valid():
@@ -898,6 +913,13 @@ class PatientViewSet(viewsets.ModelViewSet):
 class ConsultationViewSet(viewsets.ModelViewSet):
     queryset = Consultation.objects.all()
     serializer_class = ConsultationSerializer
+
+    def get_queryset(self):
+        qs = Consultation.objects.all()
+        patient_id = self.request.query_params.get('patient')
+        if patient_id:
+            return qs.filter(patient_id=patient_id)
+        return qs
     # permission_classes = [IsAuthenticated]
 
     def create(self, request, *args, **kwargs):

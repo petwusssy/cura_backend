@@ -285,6 +285,16 @@ class RequestOTPView(APIView):
         if not email:
             return Response({'error': 'Email is required'}, status=400)
         
+        # If user entered an ID or username instead of email, attempt to resolve their registered email
+        if '@' not in email:
+            found_user = User.objects.filter(username__iexact=email).first()
+            if found_user and found_user.email:
+                email = found_user.email.strip().lower()
+            else:
+                found_patient = Patient.objects.filter(id__iexact=email).first()
+                if found_patient and found_patient.email:
+                    email = found_patient.email.strip().lower()
+
         patient_exists = Patient.objects.filter(email__iexact=email).exists()
         user_exists = User.objects.filter(username__iexact=email).exists() or User.objects.filter(email__iexact=email).exists()
         if not allow_new and not patient_exists and not user_exists:
@@ -393,7 +403,7 @@ class RequestOTPView(APIView):
                 logging.getLogger(__name__).warning(f"SMTP send failed (Render port block): {mail_err}")
 
         print(f"\n=== CURA OTP VERIFICATION CODE FOR {email}: {otp} ===\n")
-        return Response({'message': 'OTP sent successfully'}, status=status.HTTP_200_OK)
+        return Response({'message': 'OTP sent successfully', 'email': email}, status=status.HTTP_200_OK)
 
 class VerifyOTPView(APIView):
     permission_classes = [AllowAny]
@@ -577,7 +587,9 @@ class SetPasswordView(APIView):
             if timezone.now() > verification.expires_at:
                 return Response({'error': 'Session expired'}, status=400)
             
-            user, created = User.objects.get_or_create(username=email, defaults={'email': email})
+            user = User.objects.filter(email__iexact=email).first() or User.objects.filter(username__iexact=email).first()
+            if not user:
+                user = User.objects.create_user(username=email, email=email)
             user.set_password(password)
             user.save()
             

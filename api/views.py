@@ -1068,14 +1068,47 @@ class AppNotificationViewSet(viewsets.ModelViewSet):
     serializer_class = AppNotificationSerializer
     # permission_classes = [IsAuthenticated]
 
+    PATIENT_TYPES = ['appointment_update', 'telemedicine_update', 'certificate']
+
+    def get_queryset(self):
+        qs = AppNotification.objects.all().order_by('-time')
+        audience = self.request.query_params.get('audience') or self.request.query_params.get('target')
+        if audience in ('admin', 'web'):
+            return qs.exclude(type__in=self.PATIENT_TYPES)
+        elif audience in ('mobile', 'patient'):
+            patient_id = self.request.query_params.get('patient_id')
+            qs = qs.exclude(type__in=['appointment_request', 'telemedicine_request', 'medcert_request', 'stock'])
+            if patient_id:
+                qs = qs.filter(patient_id=patient_id)
+            return qs
+        return qs
+
     @action(detail=False, methods=['post', 'patch'])
     def mark_all_read(self, request):
-        AppNotification.objects.filter(read=False).update(read=True)
+        audience = request.query_params.get('audience') or request.query_params.get('target') or request.data.get('audience')
+        qs = AppNotification.objects.filter(read=False)
+        if audience in ('admin', 'web'):
+            qs = qs.exclude(type__in=self.PATIENT_TYPES)
+        elif audience in ('mobile', 'patient'):
+            patient_id = request.query_params.get('patient_id') or request.data.get('patient_id')
+            qs = qs.exclude(type__in=['appointment_request', 'telemedicine_request', 'medcert_request', 'stock'])
+            if patient_id:
+                qs = qs.filter(patient_id=patient_id)
+        qs.update(read=True)
         return Response({'status': 'all marked as read'})
 
     @action(detail=False, methods=['post', 'delete'])
     def clear_all(self, request):
-        AppNotification.objects.all().delete()
+        audience = request.query_params.get('audience') or request.query_params.get('target') or request.data.get('audience')
+        qs = AppNotification.objects.all()
+        if audience in ('admin', 'web'):
+            qs = qs.exclude(type__in=self.PATIENT_TYPES)
+        elif audience in ('mobile', 'patient'):
+            patient_id = request.query_params.get('patient_id') or request.data.get('patient_id')
+            qs = qs.exclude(type__in=['appointment_request', 'telemedicine_request', 'medcert_request', 'stock'])
+            if patient_id:
+                qs = qs.filter(patient_id=patient_id)
+        qs.delete()
         return Response({'status': 'all notifications cleared'})
 
 from .models import TelemedicineRequest

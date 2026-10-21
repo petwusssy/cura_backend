@@ -388,12 +388,60 @@ class LoginAttempt(models.Model):
     def __str__(self):
         return f"LoginAttempt({self.identifier}, fails={self.failed_attempts})"
 
-from django.db.models.signals import pre_save
+from django.db.models.signals import pre_save, post_delete
 from django.dispatch import receiver
 
 @receiver(pre_save, sender=User)
 def ensure_superuser_is_staff(sender, instance, **kwargs):
     if instance.is_superuser and not instance.is_staff:
         instance.is_staff = True
+
+@receiver(post_delete, sender=Patient)
+def cleanup_on_patient_delete(sender, instance, **kwargs):
+    user_pks = set()
+    if instance.email:
+        user_pks.update(User.objects.filter(is_staff=False, is_superuser=False, email__iexact=instance.email).values_list('pk', flat=True))
+        user_pks.update(User.objects.filter(is_staff=False, is_superuser=False, username__iexact=instance.email).values_list('pk', flat=True))
+    if instance.id:
+        user_pks.update(User.objects.filter(is_staff=False, is_superuser=False, username__iexact=str(instance.id)).values_list('pk', flat=True))
+    if user_pks:
+        User.objects.filter(pk__in=user_pks).delete()
+
+    if instance.id:
+        AppNotification.objects.filter(patient_id=str(instance.id)).delete()
+        Bed.objects.filter(patientId=str(instance.id)).update(
+            status='Available', patientName=None, patientId=None, timeOccupied=None, reason=None, allottedTime=None
+        )
+        BedHistory.objects.filter(patientId=str(instance.id)).delete()
+        LoginAttempt.objects.filter(identifier__iexact=str(instance.id)).delete()
+
+    if instance.name:
+        AppNotification.objects.filter(patientName__iexact=instance.name).delete()
+
+    if instance.email:
+        OTPVerification.objects.filter(email__iexact=instance.email).delete()
+        LoginAttempt.objects.filter(identifier__iexact=instance.email).delete()
+
+@receiver(post_delete, sender=User)
+def cleanup_on_user_delete(sender, instance, **kwargs):
+    if not instance.is_staff and not instance.is_superuser:
+        patient_pks = set()
+        if instance.email:
+            patient_pks.update(Patient.objects.filter(email__iexact=instance.email).values_list('pk', flat=True))
+        if instance.username:
+            patient_pks.update(Patient.objects.filter(id__iexact=instance.username).values_list('pk', flat=True))
+            patient_pks.update(Patient.objects.filter(email__iexact=instance.username).values_list('pk', flat=True))
+
+        for pid in patient_pks:
+            p = Patient.objects.filter(pk=pid).first()
+            if p:
+                p.delete()
+
+        if instance.email:
+            OTPVerification.objects.filter(email__iexact=instance.email).delete()
+            LoginAttempt.objects.filter(identifier__iexact=instance.email).delete()
+        if instance.username:
+            LoginAttempt.objects.filter(identifier__iexact=instance.username).delete()
+
 
 

@@ -9,10 +9,22 @@ from django.contrib.auth.models import User
 
 class PatientSerializer(serializers.ModelSerializer):
     isClaimed = serializers.SerializerMethodField()
+    contact = serializers.CharField(required=False, allow_blank=True, default='Not Provided')
+    birthday = serializers.DateField(required=False, allow_null=True, default='2000-01-01')
+    age = serializers.IntegerField(required=False, default=0)
 
     class Meta:
         model = Patient
         fields = '__all__'
+
+    def validate_contact(self, value):
+        return value.strip() if value and value.strip() else 'Not Provided'
+
+    def validate_birthday(self, value):
+        return value if value else '2000-01-01'
+
+    def validate_age(self, value):
+        return value if value is not None else 0
 
     def get_isClaimed(self, obj):
         if hasattr(obj, 'is_claimed'):

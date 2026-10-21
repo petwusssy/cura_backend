@@ -1137,7 +1137,7 @@ class MedicalCertificateViewSet(viewsets.ModelViewSet):
             from .models import AppNotification
             p = instance.patient
             AppNotification.objects.create(
-                type='general',
+                type='certificate',
                 message=f'Your Medical Certificate ({instance.purpose}) has been issued by {instance.doctor or "Clinic Physician"}.',
                 patientName=p.name,
                 patient_id=str(p.id),
@@ -1181,10 +1181,18 @@ class AppNotificationViewSet(viewsets.ModelViewSet):
             return qs.exclude(type__in=self.PATIENT_TYPES)
         elif audience in ('mobile', 'patient'):
             patient_id = self.request.query_params.get('patient_id')
+            patient_name = self.request.query_params.get('patient_name')
             qs = qs.exclude(type__in=['appointment_request', 'telemedicine_request', 'medcert_request', 'stock'])
             if patient_id:
-                qs = qs.filter(patient_id=patient_id)
-            return qs
+                from django.db.models import Q
+                query = Q(patient_id=str(patient_id).strip())
+                if patient_name:
+                    query |= Q(patientName__iexact=str(patient_name).strip())
+                return qs.filter(query)
+            elif patient_name:
+                return qs.filter(patientName__iexact=str(patient_name).strip())
+            else:
+                return qs.filter(patient_id__isnull=True, patientName__isnull=True)
         return qs
 
     @action(detail=False, methods=['post', 'patch'])
@@ -1195,9 +1203,18 @@ class AppNotificationViewSet(viewsets.ModelViewSet):
             qs = qs.exclude(type__in=self.PATIENT_TYPES)
         elif audience in ('mobile', 'patient'):
             patient_id = request.query_params.get('patient_id') or request.data.get('patient_id')
+            patient_name = request.query_params.get('patient_name') or request.data.get('patient_name')
             qs = qs.exclude(type__in=['appointment_request', 'telemedicine_request', 'medcert_request', 'stock'])
             if patient_id:
-                qs = qs.filter(patient_id=patient_id)
+                from django.db.models import Q
+                query = Q(patient_id=str(patient_id).strip())
+                if patient_name:
+                    query |= Q(patientName__iexact=str(patient_name).strip())
+                qs = qs.filter(query)
+            elif patient_name:
+                qs = qs.filter(patientName__iexact=str(patient_name).strip())
+            else:
+                qs = qs.filter(patient_id__isnull=True, patientName__isnull=True)
         qs.update(read=True)
         return Response({'status': 'all marked as read'})
 
@@ -1209,9 +1226,18 @@ class AppNotificationViewSet(viewsets.ModelViewSet):
             qs = qs.exclude(type__in=self.PATIENT_TYPES)
         elif audience in ('mobile', 'patient'):
             patient_id = request.query_params.get('patient_id') or request.data.get('patient_id')
+            patient_name = request.query_params.get('patient_name') or request.data.get('patient_name')
             qs = qs.exclude(type__in=['appointment_request', 'telemedicine_request', 'medcert_request', 'stock'])
             if patient_id:
-                qs = qs.filter(patient_id=patient_id)
+                from django.db.models import Q
+                query = Q(patient_id=str(patient_id).strip())
+                if patient_name:
+                    query |= Q(patientName__iexact=str(patient_name).strip())
+                qs = qs.filter(query)
+            elif patient_name:
+                qs = qs.filter(patientName__iexact=str(patient_name).strip())
+            else:
+                qs = qs.filter(patient_id__isnull=True, patientName__isnull=True)
         qs.delete()
         return Response({'status': 'all notifications cleared'})
 

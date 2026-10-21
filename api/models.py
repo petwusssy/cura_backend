@@ -215,6 +215,8 @@ class AppNotification(models.Model):
         ('appointment_request', 'appointment_request'),
         ('telemedicine_update', 'telemedicine_update'),
         ('appointment_update', 'appointment_update'),
+        ('certificate', 'certificate'),
+        ('medcert_request', 'medcert_request'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

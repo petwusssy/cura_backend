@@ -21,6 +21,8 @@ router.register(r'appointments', views.AppointmentRequestViewSet, basename='appo
 router.register(r'queue', views.PatientQueueViewSet, basename='queue')
 router.register(r'advisory', views.ClinicAdvisoryViewSet, basename='advisory')
 router.register(r'medcert-requests', views.MedicalCertificateRequestViewSet, basename='medcert-requests')
+router.register(r'staff', views.ClinicStaffViewSet, basename='staff')
+router.register(r'audit-logs', views.AuditLogViewSet, basename='audit-logs')
 
 
 urlpatterns = [

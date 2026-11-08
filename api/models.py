@@ -446,4 +446,38 @@ def cleanup_on_user_delete(sender, instance, **kwargs):
             LoginAttempt.objects.filter(identifier__iexact=instance.username).delete()
 
 
+class ClinicStaff(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=150)
+    role = models.CharField(max_length=80, default='Staff Nurse')
+    pin_hash = models.CharField(max_length=255)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return f"{self.name} ({self.role})"
+
+
+class AuditLog(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    staff = models.ForeignKey(ClinicStaff, on_delete=models.SET_NULL, null=True, blank=True, related_name='audit_logs')
+    staff_name_snapshot = models.CharField(max_length=150)
+    staff_role_snapshot = models.CharField(max_length=80, blank=True, default='Staff Nurse')
+    action = models.CharField(max_length=100)
+    target_type = models.CharField(max_length=80, blank=True, default='')
+    target_id = models.CharField(max_length=120, blank=True, default='')
+    details = models.TextField(blank=True, default='')
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-timestamp']
+
+    def __str__(self):
+        return f"[{self.timestamp}] {self.staff_name_snapshot}: {self.action}"
+
+
+
 

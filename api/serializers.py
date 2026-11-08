@@ -270,4 +270,51 @@ class MedicalCertificateRequestSerializer(serializers.ModelSerializer):
         model = MedicalCertificateRequest
         fields = '__all__'
 
+from django.contrib.auth.hashers import make_password, check_password
+from .models import ClinicStaff, AuditLog
+
+class ClinicStaffSerializer(serializers.ModelSerializer):
+    pin = serializers.CharField(write_only=True, required=False, min_length=4, max_length=4)
+
+    class Meta:
+        model = ClinicStaff
+        fields = ['id', 'name', 'role', 'pin', 'is_active', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+    def validate_pin(self, value):
+        if not value or not value.isdigit() or len(value) != 4:
+            raise serializers.ValidationError("PIN must be exactly 4 digits.")
+        instance_id = self.instance.id if self.instance else None
+        for staff in ClinicStaff.objects.filter(is_active=True).exclude(id=instance_id):
+            if check_password(value, staff.pin_hash):
+                raise serializers.ValidationError("This 4-digit PIN is already assigned to another active staff member.")
+        return value
+
+    def create(self, validated_data):
+        pin = validated_data.pop('pin', None)
+        if not pin:
+            raise serializers.ValidationError({'pin': 'A 4-digit PIN is required.'})
+        validated_data['name'] = validated_data.get('name', '').strip().upper()
+        validated_data['pin_hash'] = make_password(pin)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        pin = validated_data.pop('pin', None)
+        if 'name' in validated_data:
+            validated_data['name'] = validated_data['name'].strip().upper()
+        if pin:
+            instance.pin_hash = make_password(pin)
+        return super().update(instance, validated_data)
+
+
+class AuditLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AuditLog
+        fields = [
+            'id', 'staff', 'staff_name_snapshot', 'staff_role_snapshot',
+            'action', 'target_type', 'target_id', 'details', 'timestamp'
+        ]
+        read_only_fields = ['id', 'timestamp']
+
+
 

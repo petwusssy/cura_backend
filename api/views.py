@@ -1657,3 +1657,79 @@ class MedicalCertificateRequestViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(medcert_req)
         return Response(serializer.data)
 
+
+from django.contrib.auth.hashers import check_password
+from .models import ClinicStaff, AuditLog
+from .serializers import ClinicStaffSerializer, AuditLogSerializer
+
+
+class ClinicStaffViewSet(viewsets.ModelViewSet):
+    queryset = ClinicStaff.objects.all().order_by('name')
+    serializer_class = ClinicStaffSerializer
+
+    @action(detail=False, methods=['post'], url_path='verify-admin')
+    def verify_admin(self, request):
+        password = (request.data.get('password') or '').strip()
+        username = (request.data.get('username') or '').strip()
+        if not password:
+            return Response({'valid': False, 'error': 'Password is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. Check current authenticated user if present
+        if getattr(request.user, 'is_authenticated', False) and request.user.check_password(password):
+            return Response({'valid': True})
+
+        # 2. Check username from active workstation session
+        if username:
+            u = User.objects.filter(username__iexact=username).first()
+            if u and u.check_password(password):
+                return Response({'valid': True})
+
+        # 3. Check any staff/superuser account configured in Django
+        for admin_user in User.objects.filter(models.Q(is_superuser=True) | models.Q(is_staff=True)):
+            if admin_user.check_password(password):
+                return Response({'valid': True})
+
+        # 4. Fallback check against Render ENV superuser password if present
+        env_pw = os.environ.get('DJANGO_SUPERUSER_PASSWORD') or os.environ.get('ADMIN_PASSWORD')
+        if env_pw and password == env_pw:
+            return Response({'valid': True})
+
+        return Response(
+            {'valid': False, 'error': 'Incorrect CURA login password.'},
+            status=status.HTTP_401_UNAUTHORIZED
+        )
+
+    @action(detail=False, methods=['post'], url_path='verify-pin')
+    def verify_pin(self, request):
+        pin = (request.data.get('pin') or '').strip()
+        if not pin or len(pin) != 4 or not pin.isdigit():
+            return Response(
+                {'valid': False, 'error': 'Please enter a valid 4-digit PIN.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        for staff_member in ClinicStaff.objects.filter(is_active=True):
+            if check_password(pin, staff_member.pin_hash):
+                return Response({
+                    'valid': True,
+                    'staff': {
+                        'id': str(staff_member.id),
+                        'name': staff_member.name,
+                        'role': staff_member.role,
+                    }
+                })
+
+        return Response(
+            {'valid': False, 'error': 'Invalid or inactive 4-digit PIN.'},
+            status=status.HTTP_401_UNAUTHORIZED
+        )
+
+
+class AuditLogViewSet(viewsets.ModelViewSet):
+    queryset = AuditLog.objects.all().order_by('-timestamp')
+    serializer_class = AuditLogSerializer
+
+    def get_queryset(self):
+        return AuditLog.objects.all().order_by('-timestamp')[:500]
+
+

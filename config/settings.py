@@ -87,9 +87,34 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
 def _parse_database_url(url):
+    sqlite_fallback = dj_database_url.parse(f"sqlite:///{BASE_DIR / 'db.sqlite3'}")
+    if not url or str(url).startswith('sqlite'):
+        return sqlite_fallback
+
     parsed = dj_database_url.parse(url, conn_max_age=60)
     if parsed and not parsed.get('NAME'):
         parsed['NAME'] = 'postgres'
+
+    # Verify PostgreSQL reachability so Render builds/boots never crash when Supabase Free Tier is paused
+    if parsed and 'postgresql' in parsed.get('ENGINE', ''):
+        try:
+            import psycopg2
+            conn = psycopg2.connect(
+                dbname=parsed.get('NAME') or 'postgres',
+                user=parsed.get('USER'),
+                password=parsed.get('PASSWORD'),
+                host=parsed.get('HOST'),
+                port=parsed.get('PORT') or 5432,
+                connect_timeout=5,
+            )
+            conn.close()
+        except Exception as exc:
+            print(
+                f"[CURA DB WARNING] Primary DATABASE_URL unreachable ({exc}). "
+                "Falling back to SQLite until Supabase project is restored/unpaused."
+            )
+            return sqlite_fallback
+
     return parsed
 
 DATABASES = {
@@ -102,7 +127,8 @@ DATABASES = {
 
 # Required for Render / PgBouncer connection pooling:
 # Disables server-side named cursors that cause "cursor does not exist" InvalidCursorName errors
-DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
+if 'postgresql' in DATABASES['default'].get('ENGINE', ''):
+    DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators

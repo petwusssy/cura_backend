@@ -1667,37 +1667,74 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
     queryset = ClinicStaff.objects.all().order_by('name')
     serializer_class = ClinicStaffSerializer
 
+    USER_MGMT_SENTINEL = '__cura_user_mgmt__'
+    DEFAULT_MGMT_PASSWORD = 'uaclinic-admin'
+
+    def _is_valid_mgmt_password(self, password: str) -> bool:
+        if not password:
+            return False
+        env_master = (
+            os.environ.get('USER_MANAGEMENT_PASSWORD')
+            or os.environ.get('ADMIN_SETTINGS_PASSWORD')
+        )
+        # 1. Always allow Render ENV USER_MANAGEMENT_PASSWORD if configured (Master Recovery Key)
+        if env_master and password == env_master:
+            return True
+
+        # 2. Check custom password saved via Settings UI (stored on inactive sentinel User)
+        sentinel = User.objects.filter(username=self.USER_MGMT_SENTINEL).first()
+        if sentinel and sentinel.has_usable_password():
+            return sentinel.check_password(password)
+
+        # 3. If neither ENV nor custom UI password has been set yet, use initial default
+        if not env_master:
+            return password == self.DEFAULT_MGMT_PASSWORD
+        return False
+
     @action(detail=False, methods=['post'], url_path='verify-admin')
     def verify_admin(self, request):
         password = (request.data.get('password') or '').strip()
-        username = (request.data.get('username') or '').strip()
         if not password:
             return Response({'valid': False, 'error': 'Password is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 1. Check current authenticated user if present
-        if getattr(request.user, 'is_authenticated', False) and request.user.check_password(password):
-            return Response({'valid': True})
-
-        # 2. Check username from active workstation session
-        if username:
-            u = User.objects.filter(username__iexact=username).first()
-            if u and u.check_password(password):
-                return Response({'valid': True})
-
-        # 3. Check any staff/superuser account configured in Django
-        for admin_user in User.objects.filter(models.Q(is_superuser=True) | models.Q(is_staff=True)):
-            if admin_user.check_password(password):
-                return Response({'valid': True})
-
-        # 4. Fallback check against Render ENV superuser password if present
-        env_pw = os.environ.get('DJANGO_SUPERUSER_PASSWORD') or os.environ.get('ADMIN_PASSWORD')
-        if env_pw and password == env_pw:
+        if self._is_valid_mgmt_password(password):
             return Response({'valid': True})
 
         return Response(
-            {'valid': False, 'error': 'Incorrect CURA login password.'},
+            {'valid': False, 'error': 'Incorrect User Management password.'},
             status=status.HTTP_401_UNAUTHORIZED
         )
+
+    @action(detail=False, methods=['post'], url_path='change-admin-password')
+    def change_admin_password(self, request):
+        current_password = (request.data.get('current_password') or '').strip()
+        new_password = (request.data.get('new_password') or '').strip()
+
+        if not current_password or not new_password:
+            return Response(
+                {'error': 'Both current and new passwords are required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if len(new_password) < 6:
+            return Response(
+                {'error': 'New User Management password must be at least 6 characters.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if not self._is_valid_mgmt_password(current_password):
+            return Response(
+                {'error': 'Current User Management password is incorrect.'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        sentinel, _ = User.objects.get_or_create(
+            username=self.USER_MGMT_SENTINEL,
+            defaults={'is_active': False, 'is_staff': False, 'is_superuser': False}
+        )
+        sentinel.is_active = False
+        sentinel.set_password(new_password)
+        sentinel.save()
+
+        return Response({'success': True, 'message': 'User Management password updated successfully.'})
 
     @action(detail=False, methods=['post'], url_path='verify-pin')
     def verify_pin(self, request):

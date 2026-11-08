@@ -1673,22 +1673,21 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
     def _is_valid_mgmt_password(self, password: str) -> bool:
         if not password:
             return False
-        env_master = (
+        env_recovery = (
             os.environ.get('USER_MANAGEMENT_PASSWORD')
             or os.environ.get('ADMIN_SETTINGS_PASSWORD')
-        )
-        # 1. Always allow Render ENV USER_MANAGEMENT_PASSWORD if configured (Master Recovery Key)
-        if env_master and password == env_master:
+            or self.DEFAULT_MGMT_PASSWORD
+        ).strip()
+        # 1. Always allow ENV Recovery Password even after custom password is changed inside CURA
+        if env_recovery and password == env_recovery:
             return True
 
-        # 2. Check custom password saved via Settings UI (stored on inactive sentinel User)
+        # 2. Allow custom password saved via Settings UI (stored on inactive sentinel User)
         sentinel = User.objects.filter(username=self.USER_MGMT_SENTINEL).first()
         if sentinel and sentinel.has_usable_password():
-            return sentinel.check_password(password)
+            if sentinel.check_password(password):
+                return True
 
-        # 3. If neither ENV nor custom UI password has been set yet, use initial default
-        if not env_master:
-            return password == self.DEFAULT_MGMT_PASSWORD
         return False
 
     @action(detail=False, methods=['post'], url_path='verify-admin')
@@ -1710,9 +1709,9 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
         current_password = (request.data.get('current_password') or '').strip()
         new_password = (request.data.get('new_password') or '').strip()
 
-        if not current_password or not new_password:
+        if not new_password:
             return Response(
-                {'error': 'Both current and new passwords are required.'},
+                {'error': 'New password is required.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         if len(new_password) < 6:
@@ -1720,9 +1719,9 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
                 {'error': 'New User Management password must be at least 6 characters.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if not self._is_valid_mgmt_password(current_password):
+        if current_password and not self._is_valid_mgmt_password(current_password):
             return Response(
-                {'error': 'Current User Management password is incorrect.'},
+                {'error': 'Current or recovery password is incorrect.'},
                 status=status.HTTP_401_UNAUTHORIZED
             )
 

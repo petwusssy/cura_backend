@@ -1719,7 +1719,27 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
             if sentinel.check_password(clean_pw):
                 return True
 
-        # 3. Allow default fallback ONLY if neither ENV var nor custom password is set
+        # 3. If this Render instance does not have USER_MANAGEMENT_PASSWORD set locally, verify against cura-backend-dvj5 ENV
+        if not env_candidates and 'cura-backend-dvj5' not in os.environ.get('RENDER_EXTERNAL_URL', ''):
+            try:
+                import urllib.request as _ureq
+                import json as _json
+                req = _ureq.Request(
+                    'https://cura-backend-dvj5.onrender.com/api/staff/verify-admin/',
+                    data=_json.dumps({'password': clean_pw}).encode('utf-8'),
+                    headers={'Content-Type': 'application/json'},
+                    method='POST',
+                )
+                with _ureq.urlopen(req, timeout=5) as resp:
+                    body = _json.loads(resp.read().decode('utf-8'))
+                    if body.get('valid'):
+                        return True
+                    if body.get('env_configured'):
+                        return False
+            except Exception:
+                pass
+
+        # 4. Allow default fallback ONLY if neither ENV var nor custom password is set
         if not env_candidates and not (sentinel and sentinel.has_usable_password()):
             if clean_pw == self.DEFAULT_MGMT_PASSWORD:
                 return True

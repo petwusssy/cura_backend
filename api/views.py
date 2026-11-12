@@ -1,4 +1,6 @@
+import os
 import uuid
+from decouple import config
 from django.http import JsonResponse
 from django.contrib.auth.models import User
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
@@ -1664,6 +1666,8 @@ from .serializers import ClinicStaffSerializer, AuditLogSerializer
 class ClinicStaffViewSet(viewsets.ModelViewSet):
     queryset = ClinicStaff.objects.all().order_by('name')
     serializer_class = ClinicStaffSerializer
+    authentication_classes = []
+    permission_classes = [AllowAny]
 
     USER_MGMT_SENTINEL = '__cura_user_mgmt__'
     DEFAULT_MGMT_PASSWORD = 'uaclinic-admin'
@@ -1671,19 +1675,27 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
     def _is_valid_mgmt_password(self, password: str) -> bool:
         if not password:
             return False
-        env_recovery = (
-            os.environ.get('USER_MANAGEMENT_PASSWORD')
-            or os.environ.get('ADMIN_SETTINGS_PASSWORD')
-            or self.DEFAULT_MGMT_PASSWORD
-        ).strip()
-        # 1. Always allow ENV Recovery Password even after custom password is changed inside CURA
-        if env_recovery and password == env_recovery:
+        clean_pw = password.strip()
+        env_candidates = [
+            (os.environ.get('USER_MANAGEMENT_PASSWORD') or '').strip(),
+            (config('USER_MANAGEMENT_PASSWORD', default='') or '').strip(),
+            (os.environ.get('ADMIN_SETTINGS_PASSWORD') or '').strip(),
+            (config('ADMIN_SETTINGS_PASSWORD', default='') or '').strip(),
+        ]
+        env_candidates = [c for c in env_candidates if c]
+
+        # 1. Always allow Render ENV USER_MANAGEMENT_PASSWORD / ADMIN_SETTINGS_PASSWORD
+        if clean_pw in env_candidates:
             return True
 
-        # 2. Allow custom password saved via Settings UI (stored on inactive sentinel User)
+        # 2. If no ENV var is configured on Render, allow default fallback
+        if not env_candidates and clean_pw == self.DEFAULT_MGMT_PASSWORD:
+            return True
+
+        # 3. Allow custom password saved via Settings UI (stored on inactive sentinel User)
         sentinel = User.objects.filter(username=self.USER_MGMT_SENTINEL).first()
         if sentinel and sentinel.has_usable_password():
-            if sentinel.check_password(password):
+            if sentinel.check_password(clean_pw):
                 return True
 
         return False

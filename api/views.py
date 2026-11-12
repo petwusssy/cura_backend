@@ -1732,25 +1732,15 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
         if not password:
             return Response({'valid': False, 'error': 'Password is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        env_pw_list = self._get_env_mgmt_passwords()
-        diag = {
-            'env_configured': bool(env_pw_list),
-            'service': os.environ.get('RENDER_SERVICE_NAME', ''),
-            'commit': os.environ.get('RENDER_GIT_COMMIT', '')[:7],
-            'env_keys': sorted([
-                k for k in os.environ.keys()
-                if any(w in k.upper() for w in ('USER', 'MGMT', 'MANAGE', 'PASS', 'ADMIN', 'DJANGO', 'CURA', 'VITE'))
-            ]),
-        }
-
+        env_configured = bool(self._get_env_mgmt_passwords())
         if self._is_valid_mgmt_password(password):
-            return Response({'valid': True, **diag})
+            return Response({'valid': True, 'env_configured': env_configured})
 
         return Response(
             {
                 'valid': False,
+                'env_configured': env_configured,
                 'error': 'Incorrect User Management password.',
-                **diag,
             },
             status=status.HTTP_401_UNAUTHORIZED
         )

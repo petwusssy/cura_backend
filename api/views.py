@@ -1685,16 +1685,26 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
                 candidates.append(val)
         return candidates
 
+    def _is_main_cura_login_password(self, password: str) -> bool:
+        for admin_user in User.objects.filter(is_active=True, is_superuser=True):
+            if admin_user.check_password(password):
+                return True
+        return False
+
     def _is_valid_mgmt_password(self, password: str) -> bool:
         if not password:
             return False
         clean_pw = password.strip()
         env_candidates = self._get_env_mgmt_passwords()
 
-        # 1. Always allow Render ENV USER_MANAGEMENT_PASSWORD / ADMIN_SETTINGS_PASSWORD (case-exact or case-insensitive)
+        # 1. Always allow Render ENV USER_MANAGEMENT_PASSWORD (permanent Master / Recovery Key)
         for env_pw in env_candidates:
-            if clean_pw == env_pw or clean_pw.lower() == env_pw.lower():
+            if clean_pw == env_pw:
                 return True
+
+        # Never allow the main CURA login password (e.g. ANTHROPEAK2026) as User Management password
+        if self._is_main_cura_login_password(clean_pw):
+            return False
 
         # 2. Allow custom password saved via Settings UI (stored on inactive sentinel User)
         sentinel = User.objects.filter(username=self.USER_MGMT_SENTINEL).first()
@@ -1702,14 +1712,10 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
             if sentinel.check_password(clean_pw):
                 return True
 
-        # 3. Allow active Django Superuser / Admin password as fallback if ENV var is not yet saved on Render
-        for admin_user in User.objects.filter(is_active=True, is_superuser=True):
-            if admin_user.check_password(clean_pw):
+        # 3. Allow default fallback ONLY if neither ENV var nor custom password is set
+        if not env_candidates and not (sentinel and sentinel.has_usable_password()):
+            if clean_pw == self.DEFAULT_MGMT_PASSWORD:
                 return True
-
-        # 4. Allow default fallback if no ENV var is configured
-        if not env_candidates and clean_pw == self.DEFAULT_MGMT_PASSWORD:
-            return True
 
         return False
 
@@ -1744,6 +1750,11 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
         if len(new_password) < 6:
             return Response(
                 {'error': 'New User Management password must be at least 6 characters.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if self._is_main_cura_login_password(new_password):
+            return Response(
+                {'error': 'User Management password must be separate from the main CURA login password.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         if current_password and not self._is_valid_mgmt_password(current_password):

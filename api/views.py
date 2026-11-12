@@ -1672,31 +1672,44 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
     USER_MGMT_SENTINEL = '__cura_user_mgmt__'
     DEFAULT_MGMT_PASSWORD = 'uaclinic-admin'
 
+    def _get_env_mgmt_passwords(self):
+        candidates = [
+            v.strip()
+            for k, v in os.environ.items()
+            if k.strip().upper() in ('USER_MANAGEMENT_PASSWORD', 'ADMIN_SETTINGS_PASSWORD', 'USER_MGMT_PASSWORD')
+            and v and v.strip()
+        ]
+        for key in ('USER_MANAGEMENT_PASSWORD', 'ADMIN_SETTINGS_PASSWORD'):
+            val = (config(key, default='') or '').strip()
+            if val and val not in candidates:
+                candidates.append(val)
+        return candidates
+
     def _is_valid_mgmt_password(self, password: str) -> bool:
         if not password:
             return False
         clean_pw = password.strip()
-        env_candidates = [
-            (os.environ.get('USER_MANAGEMENT_PASSWORD') or '').strip(),
-            (config('USER_MANAGEMENT_PASSWORD', default='') or '').strip(),
-            (os.environ.get('ADMIN_SETTINGS_PASSWORD') or '').strip(),
-            (config('ADMIN_SETTINGS_PASSWORD', default='') or '').strip(),
-        ]
-        env_candidates = [c for c in env_candidates if c]
+        env_candidates = self._get_env_mgmt_passwords()
 
-        # 1. Always allow Render ENV USER_MANAGEMENT_PASSWORD / ADMIN_SETTINGS_PASSWORD
-        if clean_pw in env_candidates:
-            return True
+        # 1. Always allow Render ENV USER_MANAGEMENT_PASSWORD / ADMIN_SETTINGS_PASSWORD (case-exact or case-insensitive)
+        for env_pw in env_candidates:
+            if clean_pw == env_pw or clean_pw.lower() == env_pw.lower():
+                return True
 
-        # 2. If no ENV var is configured on Render, allow default fallback
-        if not env_candidates and clean_pw == self.DEFAULT_MGMT_PASSWORD:
-            return True
-
-        # 3. Allow custom password saved via Settings UI (stored on inactive sentinel User)
+        # 2. Allow custom password saved via Settings UI (stored on inactive sentinel User)
         sentinel = User.objects.filter(username=self.USER_MGMT_SENTINEL).first()
         if sentinel and sentinel.has_usable_password():
             if sentinel.check_password(clean_pw):
                 return True
+
+        # 3. Allow active Django Superuser / Admin password as fallback if ENV var is not yet saved on Render
+        for admin_user in User.objects.filter(is_active=True, is_superuser=True):
+            if admin_user.check_password(clean_pw):
+                return True
+
+        # 4. Allow default fallback if no ENV var is configured
+        if not env_candidates and clean_pw == self.DEFAULT_MGMT_PASSWORD:
+            return True
 
         return False
 
@@ -1707,10 +1720,14 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
             return Response({'valid': False, 'error': 'Password is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if self._is_valid_mgmt_password(password):
-            return Response({'valid': True})
+            return Response({'valid': True, 'env_configured': bool(self._get_env_mgmt_passwords())})
 
         return Response(
-            {'valid': False, 'error': 'Incorrect User Management password.'},
+            {
+                'valid': False,
+                'env_configured': bool(self._get_env_mgmt_passwords()),
+                'error': 'Incorrect User Management password.',
+            },
             status=status.HTTP_401_UNAUTHORIZED
         )
 

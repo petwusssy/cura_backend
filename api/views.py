@@ -1824,4 +1824,105 @@ def serve_drive_media(request, drive_id):
     return resp
 
 
+class ReportArchiveView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from .gdrive_service import list_drive_archives
+        return Response({'archives': list_drive_archives()}, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        import base64
+        from .gdrive_service import store_archive_file
+        filename = (request.data.get('filename') or f"CURA_Report_{timezone.localdate()}.xlsx").strip()
+        title = (request.data.get('title') or filename).strip()
+        staff_name = (request.data.get('staff_name') or 'SYSTEM').strip()
+        folder_key = (request.data.get('folder') or 'archives').strip()
+        mime_type = (request.data.get('mime_type') or 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').strip()
+
+        uploaded_file = request.FILES.get('file')
+        if uploaded_file:
+            raw_bytes = uploaded_file.read()
+        else:
+            b64 = (request.data.get('file_b64') or request.data.get('data') or '').strip()
+            if not b64:
+                return Response({'error': 'No report file provided.'}, status=status.HTTP_400_BAD_REQUEST)
+            if ';base64,' in b64:
+                b64 = b64.split(';base64,', 1)[1]
+            raw_bytes = base64.b64decode(b64)
+
+        info = store_archive_file(
+            raw_bytes=raw_bytes,
+            filename=filename,
+            mime_type=mime_type,
+            folder_key=folder_key,
+            staff_name=staff_name,
+            report_title=title,
+        )
+        if not info:
+            return Response({'error': 'Could not archive report to Google Drive.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(info, status=status.HTTP_200_OK)
+
+
+class ReportSyncSnapshotView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        import csv
+        import io
+        from .gdrive_service import store_archive_file
+        staff_name = (request.data.get('staff_name') or 'SYSTEM').strip()
+        today_str = str(timezone.localdate())
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            'Consultation_ID', 'Date', 'Time_In', 'Time_Out', 'Patient_ID', 'Patient_Name',
+            'Category', 'Course_Dept', 'Status', 'Complaint', 'Categories', 'Doctor',
+            'Assisting_Nurse', 'Treatments', 'Early_Dismissal', 'Destination', 'Nurse_Notes'
+        ])
+        for c in Consultation.objects.select_related('patient').prefetch_related('treatments').order_by('-date', '-timeIn')[:2000]:
+            p = c.patient
+            treats = '; '.join(f"{t.medicineName} ({t.quantity} {t.unit})" for t in c.treatments.all())
+            writer.writerow([
+                str(c.id), str(c.date), str(c.timeIn or ''), str(c.timeOut or ''),
+                str(p.id if p else c.patient_id), str(p.name if p else ''),
+                str(p.category if p else ''), str((p.course or p.department or p.gradeLevel or '') if p else ''),
+                str(c.status or ''), str(c.complaint or c.purposeOfVisit or ''),
+                ', '.join(c.categories or []), str(c.doctorName or ''),
+                str(c.assistingNurse or ''), treats,
+                'Yes' if c.earlyDismissal else 'No', str(c.dismissalDestination or ''),
+                str(c.nurseNotes or c.operationalNotes or '')
+            ])
+
+        raw_csv = buf.getvalue().encode('utf-8')
+        filename = f"CURA_Full_Clinic_Snapshot_{today_str}.csv"
+        info = store_archive_file(
+            raw_bytes=raw_csv,
+            filename=filename,
+            mime_type='text/csv; charset=utf-8',
+            folder_key='archives',
+            staff_name=staff_name,
+            report_title=f"Full Clinic Snapshot ({today_str})",
+        )
+        if not info:
+            return Response({'error': 'Snapshot sync failed.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(info, status=status.HTTP_200_OK)
+
+
+def download_drive_archive(request, drive_id):
+    from django.http import HttpResponse, Http404
+    from .gdrive_service import fetch_media_from_drive
+    result = fetch_media_from_drive(drive_id)
+    if not result:
+        raise Http404("Archive not found")
+    raw_bytes, mime_type = result
+    ext = '.csv' if 'csv' in mime_type else ('.xlsx' if 'spreadsheet' in mime_type or 'excel' in mime_type else '.bin')
+    resp = HttpResponse(raw_bytes, content_type=mime_type)
+    resp['Content-Disposition'] = f'attachment; filename="CURA_Archive_{drive_id[:8]}{ext}"'
+    resp['Access-Control-Allow-Origin'] = '*'
+    return resp
+
+
+
 

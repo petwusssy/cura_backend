@@ -59,6 +59,8 @@ class ConsultationSerializer(serializers.ModelSerializer):
         consultation = Consultation.objects.create(**validated_data)
         for treatment_data in treatments_data:
             Treatment.objects.create(consultation=consultation, **treatment_data)
+        from .gdrive_service import trigger_live_consultation_sync
+        trigger_live_consultation_sync(consultation)
         return consultation
 
     def update(self, instance, validated_data):
@@ -71,6 +73,8 @@ class ConsultationSerializer(serializers.ModelSerializer):
             instance.treatments.all().delete()
             for treatment_data in treatments_data:
                 Treatment.objects.create(consultation=instance, **treatment_data)
+        from .gdrive_service import trigger_live_consultation_sync
+        trigger_live_consultation_sync(instance)
         return instance
 
 class StockHistorySerializer(serializers.ModelSerializer):

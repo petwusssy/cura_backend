@@ -41,5 +41,9 @@ urlpatterns = [
     path('upload/', views.MediaUploadView.as_view(), name='media_upload'),
     path('upload/config/', views.MediaConfigView.as_view(), name='media_config'),
     path('media/<str:drive_id>/', views.serve_drive_media, name='serve_drive_media'),
+    path('reports/archive/', views.ReportArchiveView.as_view(), name='report_archive'),
+    path('reports/archives/', views.ReportArchiveView.as_view(), name='report_archives_list'),
+    path('reports/sync-snapshot/', views.ReportSyncSnapshotView.as_view(), name='report_sync_snapshot'),
+    path('reports/archives/<str:drive_id>/download/', views.download_drive_archive, name='download_drive_archive'),
     path('', include(router.urls)),
 ]

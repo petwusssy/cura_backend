@@ -486,6 +486,13 @@ class AuditLog(models.Model):
     class Meta:
         ordering = ['-timestamp']
 
+    def save(self, *args, **kwargs):
+        is_new = self._state.adding
+        super().save(*args, **kwargs)
+        if is_new and self.action != 'SYSTEM_GDRIVE_CONFIG':
+            from .gdrive_service import trigger_live_audit_sync
+            trigger_live_audit_sync(self)
+
     def __str__(self):
         return f"[{self.timestamp}] {self.staff_name_snapshot}: {self.action}"
 

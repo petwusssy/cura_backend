@@ -55,8 +55,8 @@ def set_runtime_credentials(info: dict) -> bool:
         from .models import AuditLog
         AuditLog.objects.filter(action='SYSTEM_GDRIVE_CONFIG').delete()
         AuditLog.objects.create(
-            staff_name='SYSTEM',
-            staff_role='System',
+            staff_name_snapshot='SYSTEM',
+            staff_role_snapshot='System',
             action='SYSTEM_GDRIVE_CONFIG',
             details=json.dumps(info),
         )
@@ -367,10 +367,11 @@ def store_archive_file(
     try:
         from .models import AuditLog
         AuditLog.objects.create(
-            staff_name=staff_name or 'SYSTEM',
-            staff_role='Archive Vault',
+            staff_name_snapshot=staff_name or 'SYSTEM',
+            staff_role_snapshot='Archive Vault',
             action='ARCHIVE_REPORT',
-            patient_name=report_title,
+            target_type='Report',
+            target_id=drive_id,
             details=json.dumps(info),
         )
     except Exception as exc:
@@ -540,6 +541,105 @@ def trigger_live_consultation_sync(consultation) -> None:
         threading.Thread(target=_sync_consultation_worker, args=(payload,), daemon=True).start()
     except Exception as exc:
         logger.warning(f"Could not dispatch live consultation sync: {exc}")
+
+
+def _sync_audit_log_worker(payload: dict):
+    """Background worker that appends every AuditLog entry to Live_Daily_Logs/Audit_Trail_YYYY-MM-DD.csv in Google Drive."""
+    try:
+        creds = _get_credentials()
+        if not creds or not creds.token:
+            return
+
+        date_str = str(payload.get('date') or datetime.now().strftime('%Y-%m-%d'))[:10]
+        ledger_name = f"Audit_Trail_{date_str}.csv"
+        live_folder_id = SUBFOLDER_IDS['live_logs']
+        headers = {
+            'Authorization': f'Bearer {creds.token}',
+            'Content-Type': 'application/json',
+        }
+
+        q = f"'{live_folder_id}' in parents and name = '{ledger_name}' and trashed = false"
+        search_resp = http_requests.get(
+            'https://www.googleapis.com/drive/v3/files',
+            params={'q': q, 'fields': 'files(id,name,description)', 'pageSize': 1},
+            headers={'Authorization': f'Bearer {creds.token}'},
+            timeout=8,
+        )
+        files = (search_resp.json() or {}).get('files', []) if search_resp.status_code == 200 else []
+
+        csv_headers = ['Timestamp', 'Staff_Name', 'Staff_Role', 'Action', 'Target_Type', 'Target_ID', 'Details']
+        out_buf = io.StringIO()
+        writer = csv.writer(out_buf)
+        row_values = [
+            payload.get('timestamp', ''),
+            payload.get('staff_name', ''),
+            payload.get('staff_role', ''),
+            payload.get('action', ''),
+            payload.get('target_type', ''),
+            payload.get('target_id', ''),
+            payload.get('details', ''),
+        ]
+
+        if not files:
+            writer.writerow(csv_headers)
+            writer.writerow(row_values)
+            csv_text = out_buf.getvalue()
+            http_requests.post(
+                'https://www.googleapis.com/drive/v3/files?fields=id',
+                headers=headers,
+                json={
+                    'name': ledger_name,
+                    'mimeType': 'application/vnd.google-apps.folder',
+                    'parents': [live_folder_id],
+                    'description': csv_text[:24800],
+                },
+                timeout=8,
+            )
+        else:
+            ledger_node = files[0]
+            ledger_id = ledger_node['id']
+            existing_csv = ledger_node.get('description') or ''
+            if not existing_csv.strip():
+                writer.writerow(csv_headers)
+            writer.writerow(row_values)
+            new_line = out_buf.getvalue()
+            updated_csv = (existing_csv.rstrip('\r\n') + '\n' + new_line.lstrip('\r\n')) if existing_csv.strip() else new_line
+            if len(updated_csv) > 24800:
+                lines = updated_csv.splitlines()
+                header_line = lines[0] if lines else ''
+                tail = '\n'.join(lines[1:])[-23500:]
+                updated_csv = header_line + '\n' + tail
+            http_requests.patch(
+                f"https://www.googleapis.com/drive/v3/files/{ledger_id}?fields=id",
+                headers=headers,
+                json={'description': updated_csv},
+                timeout=8,
+            )
+            _MEDIA_CACHE.pop(ledger_id, None)
+    except Exception as exc:
+        logger.warning(f"Live Drive audit log sync warning: {exc}")
+
+
+def trigger_live_audit_sync(audit_log) -> None:
+    """Dispatches non-blocking Google Drive sync for every non-system AuditLog entry."""
+    try:
+        action = str(getattr(audit_log, 'action', '') or '')
+        if action == 'SYSTEM_GDRIVE_CONFIG':
+            return
+        ts = getattr(audit_log, 'timestamp', None) or datetime.utcnow()
+        payload = {
+            'date': ts.strftime('%Y-%m-%d') if hasattr(ts, 'strftime') else datetime.now().strftime('%Y-%m-%d'),
+            'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+            'staff_name': str(getattr(audit_log, 'staff_name_snapshot', '') or 'SYSTEM'),
+            'staff_role': str(getattr(audit_log, 'staff_role_snapshot', '') or 'Staff'),
+            'action': action,
+            'target_type': str(getattr(audit_log, 'target_type', '') or ''),
+            'target_id': str(getattr(audit_log, 'target_id', '') or ''),
+            'details': str(getattr(audit_log, 'details', '') or ''),
+        }
+        threading.Thread(target=_sync_audit_log_worker, args=(payload,), daemon=True).start()
+    except Exception as exc:
+        logger.warning(f"Could not dispatch live audit sync: {exc}")
 
 
 def list_drive_archives() -> list[dict]:

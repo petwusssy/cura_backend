@@ -1676,7 +1676,11 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
         candidates = [
             v.strip()
             for k, v in os.environ.items()
-            if k.strip().upper() in ('USER_MANAGEMENT_PASSWORD', 'ADMIN_SETTINGS_PASSWORD', 'USER_MGMT_PASSWORD')
+            if (
+                k.strip().upper() in ('USER_MANAGEMENT_PASSWORD', 'ADMIN_SETTINGS_PASSWORD', 'USER_MGMT_PASSWORD')
+                or 'USER_MANAGEMENT' in k.strip().upper()
+                or 'MANAGEMENT_PASSWORD' in k.strip().upper()
+            )
             and v and v.strip()
         ]
         for key in ('USER_MANAGEMENT_PASSWORD', 'ADMIN_SETTINGS_PASSWORD'):
@@ -1686,9 +1690,12 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
         return candidates
 
     def _is_main_cura_login_password(self, password: str) -> bool:
-        for admin_user in User.objects.filter(is_active=True, is_superuser=True):
-            if admin_user.check_password(password):
-                return True
+        django_pw = (os.environ.get('DJANGO_PASSWORD') or '').strip()
+        if django_pw and password == django_pw:
+            return True
+        main_admin = User.objects.filter(username__iexact='anthropeak2026').first()
+        if main_admin and main_admin.check_password(password):
+            return True
         return False
 
     def _is_valid_mgmt_password(self, password: str) -> bool:
@@ -1725,14 +1732,25 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
         if not password:
             return Response({'valid': False, 'error': 'Password is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        env_pw_list = self._get_env_mgmt_passwords()
+        diag = {
+            'env_configured': bool(env_pw_list),
+            'service': os.environ.get('RENDER_SERVICE_NAME', ''),
+            'commit': os.environ.get('RENDER_GIT_COMMIT', '')[:7],
+            'env_keys': sorted([
+                k for k in os.environ.keys()
+                if any(w in k.upper() for w in ('USER', 'MGMT', 'MANAGE', 'PASS', 'ADMIN', 'DJANGO', 'CURA', 'VITE'))
+            ]),
+        }
+
         if self._is_valid_mgmt_password(password):
-            return Response({'valid': True, 'env_configured': bool(self._get_env_mgmt_passwords())})
+            return Response({'valid': True, **diag})
 
         return Response(
             {
                 'valid': False,
-                'env_configured': bool(self._get_env_mgmt_passwords()),
                 'error': 'Incorrect User Management password.',
+                **diag,
             },
             status=status.HTTP_401_UNAUTHORIZED
         )

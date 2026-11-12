@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+google_credentials.json
 venv/
 env/
 .venv/

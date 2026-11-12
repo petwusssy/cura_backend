@@ -36,6 +36,9 @@ class Patient(models.Model):
             self.guardianName = self.guardianName.strip().upper()
         if self.emergencyContact:
             self.emergencyContact = self.emergencyContact.strip().upper()
+        if self.avatar and str(self.avatar).strip().startswith('data:image/'):
+            from .gdrive_service import offload_image
+            self.avatar = offload_image(self.avatar, category='avatar', label=self.id or self.name or 'patient')
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -72,6 +75,14 @@ class Consultation(models.Model):
     purposeOfVisit = models.CharField(max_length=255, blank=True, null=True)
     operationalNotes = models.TextField(blank=True, null=True)
     assistingNurse = models.CharField(max_length=255, blank=True, null=True)
+
+    def save(self, *args, **kwargs):
+        from .gdrive_service import offload_image
+        if self.prescriptionImage and str(self.prescriptionImage).strip().startswith('data:image/'):
+            self.prescriptionImage = offload_image(self.prescriptionImage, category='prescription', label=self.patient_id or 'rx')
+        if self.fetcherIdImage and str(self.fetcherIdImage).strip().startswith('data:image/'):
+            self.fetcherIdImage = offload_image(self.fetcherIdImage, category='fetcher_id', label=self.patient_id or 'id')
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.patient.name} - {self.date}"

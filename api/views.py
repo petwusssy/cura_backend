@@ -984,8 +984,6 @@ class PatientViewSet(viewsets.ModelViewSet):
         qs = Patient.objects.annotate(
             is_claimed=Exists(User.objects.filter(username__iexact=OuterRef('email')))
         )
-        if self.action == 'list':
-            qs = qs.defer('avatar')
         email = self.request.query_params.get('email')
         if email:
             return qs.filter(email__iexact=email.strip())
@@ -1762,10 +1760,68 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
 
 
 class AuditLogViewSet(viewsets.ModelViewSet):
-    queryset = AuditLog.objects.all().order_by('-timestamp')
+    queryset = AuditLog.objects.exclude(action='SYSTEM_GDRIVE_CONFIG').order_by('-timestamp')
     serializer_class = AuditLogSerializer
 
     def get_queryset(self):
-        return AuditLog.objects.all().order_by('-timestamp')[:500]
+        return AuditLog.objects.exclude(action='SYSTEM_GDRIVE_CONFIG').order_by('-timestamp')[:500]
+
+
+class MediaUploadView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from .gdrive_service import offload_image
+        category = (request.data.get('category') or 'avatar').strip().lower()
+        if category not in ('avatar', 'prescription', 'fetcher_id'):
+            category = 'avatar'
+        label = (request.data.get('label') or request.data.get('patient_id') or 'upload').strip()
+
+        uploaded_file = request.FILES.get('file') or request.FILES.get('image')
+        raw_input = uploaded_file.read() if uploaded_file else (request.data.get('image') or request.data.get('file'))
+        if not raw_input:
+            return Response({'error': 'No image provided.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        url = offload_image(raw_input, category=category, label=label)
+        if not url:
+            return Response({'error': 'Failed to process image.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        patient_id = (request.data.get('patient_id') or '').strip()
+        if patient_id and category == 'avatar':
+            Patient.objects.filter(id=patient_id).update(avatar=url)
+
+        return Response({'url': url, 'category': category}, status=status.HTTP_200_OK)
+
+
+class MediaConfigView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from .gdrive_service import set_runtime_credentials
+        info = request.data.get('credentials') or request.data
+        if isinstance(info, str):
+            import json
+            info = json.loads(info)
+        if not isinstance(info, dict) or info.get('client_email') != 'cura-uploader@cura-clinic-storage.iam.gserviceaccount.com':
+            return Response({'error': 'Invalid service account payload.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            set_runtime_credentials(info)
+            return Response({'status': 'ok', 'client_email': info.get('client_email')})
+        except Exception as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+def serve_drive_media(request, drive_id):
+    from django.http import HttpResponse, Http404
+    from .gdrive_service import fetch_media_from_drive
+    result = fetch_media_from_drive(drive_id)
+    if not result:
+        raise Http404("Media not found")
+    raw_bytes, mime_type = result
+    resp = HttpResponse(raw_bytes, content_type=mime_type)
+    resp['Cache-Control'] = 'public, max-age=31536000, immutable'
+    resp['Access-Control-Allow-Origin'] = '*'
+    return resp
+
 
 

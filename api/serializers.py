@@ -64,6 +64,7 @@ class ConsultationSerializer(serializers.ModelSerializer):
         return consultation
 
     def update(self, instance, validated_data):
+        validated_data.pop('assistingNurse', None)
         treatments_data = validated_data.pop('treatments', None)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)

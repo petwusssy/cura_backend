@@ -1834,6 +1834,50 @@ class AuditLogViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return AuditLog.objects.exclude(action='SYSTEM_GDRIVE_CONFIG').order_by('-timestamp')[:500]
 
+    @action(detail=False, methods=['get', 'post'], url_path='drive-archives')
+    def drive_archives(self, request):
+        from .gdrive_service import SUBFOLDER_IDS, list_drive_archives, store_archive_file
+        audit_folder_id = SUBFOLDER_IDS['audit_logs']
+        folder_url = f"https://drive.google.com/drive/folders/{audit_folder_id}"
+
+        if request.method == 'GET':
+            return Response({
+                'folder_id': audit_folder_id,
+                'folder_url': folder_url,
+                'archives': list_drive_archives(folder_keys=('audit_logs',)),
+            }, status=status.HTTP_200_OK)
+
+        import csv
+        import io
+        staff_name = (request.data.get('staff_name') or 'ADMIN').strip()
+        today_str = str(timezone.localdate())
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(['Timestamp', 'Staff_Name', 'Staff_Role', 'Action', 'Target_Type', 'Target_ID', 'Details'])
+        # ponytail: capped at 5000 rows (~1-2MB CSV) to bound snapshot memory/runtime per request
+        for log in AuditLog.objects.exclude(action='SYSTEM_GDRIVE_CONFIG').order_by('-timestamp')[:5000]:
+            writer.writerow([
+                log.timestamp.isoformat() if log.timestamp else '',
+                log.staff_name_snapshot or '',
+                log.staff_role_snapshot or '',
+                log.action or '',
+                log.target_type or '',
+                log.target_id or '',
+                log.details or '',
+            ])
+
+        info = store_archive_file(
+            raw_bytes=buf.getvalue().encode('utf-8'),
+            filename=f"CURA_Audit_Logs_Snapshot_{today_str}.csv",
+            mime_type='text/csv; charset=utf-8',
+            folder_key='audit_logs',
+            staff_name=staff_name,
+            report_title=f"Audit Logs Snapshot ({today_str})",
+        )
+        if not info:
+            return Response({'error': 'Could not sync audit logs to Google Drive.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({**info, 'folder_url': folder_url}, status=status.HTTP_200_OK)
+
 
 class MediaUploadView(APIView):
     permission_classes = [AllowAny]

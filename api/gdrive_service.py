@@ -1,4 +1,5 @@
 import base64
+import calendar
 import csv
 import hashlib
 import io
@@ -21,11 +22,13 @@ logger = logging.getLogger(__name__)
 
 ROOT_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_FOLDER_ID', '1lc-gyNPuUUjQUL1s07-fMcBumyWnSEIW')
 SUBFOLDER_IDS = {
+    'patients': '1Cc7f2FvQNNv4XqMBLgUtXvhdiAfvSVJT',
     'avatar': '1rDLDeJ1NHbVcUFEEFnNMtpvts0jhP70Y',
+    'live_logs': '1S52a2jI60YjFOzyal5RPrpOMOlLpltmT',
     'prescription': '1Pw0ABWq5rGfQdkXEoEKOesfSgwudGRc_',
     'fetcher_id': '1M4NMSmFdjCTCct_cdZ0jpSIt_-lEWSiD',
-    'live_logs': '1S52a2jI60YjFOzyal5RPrpOMOlLpltmT',
-    'archives': '19PlSdFmCDCKLnt0dvDyRLo40COrTYwLQ',
+    'live_reports': '1QQO74sZoq5VN05osoh4_ETrkZlSZz6uO',
+    'archives': '18OVSVoi9i3LI4v2VOBdtNEPP2ou5wzRy',
     'audit_logs': os.environ.get('GOOGLE_DRIVE_AUDIT_FOLDER_ID', '1qRJu1lh8pOmwJ8W_ugpc_OEt8ML7cnie'),
 }
 BACKEND_PUBLIC_URL = os.environ.get('BACKEND_PUBLIC_URL', 'https://cura-backend-dvj5.onrender.com').rstrip('/')
@@ -37,6 +40,14 @@ _CREDS = None
 _LOCK = threading.Lock()
 _AUDIT_LOCK = threading.Lock()
 _CONSULT_LOCK = threading.Lock()
+_MIRROR_SCHED_LOCK = threading.Lock()
+_MIRROR_TIMERS: dict[str, threading.Timer] = {}
+_MIRROR_LOCKS: dict[str, threading.Lock] = {}
+_SEEDED_MIRRORS = False
+
+
+def _manila_now() -> datetime:
+    return datetime.now(dt_timezone(timedelta(hours=8)))
 
 
 def _load_db_credentials_json() -> dict | None:
@@ -583,7 +594,7 @@ def _sync_consultation_worker(payload: dict):
         if not creds or not creds.token:
             return
 
-        date_str = str(payload.get('date') or datetime.now().strftime('%Y-%m-%d'))[:10]
+        date_str = str(payload.get('date') or _manila_now().strftime('%Y-%m-%d'))[:10]
         ledger_name = f"Consultations_{date_str}.csv"
         live_folder_id = SUBFOLDER_IDS['live_logs']
 
@@ -760,7 +771,7 @@ def _sync_audit_log_worker(payload: dict):
         if not creds or not creds.token:
             return
 
-        date_str = str(payload.get('date') or datetime.now().strftime('%Y-%m-%d'))[:10]
+        date_str = str(payload.get('date') or _manila_now().strftime('%Y-%m-%d'))[:10]
         base_name = f"Audit_Trail_{date_str}"
         audit_folder_id = SUBFOLDER_IDS['audit_logs']
         csv_headers = ['Timestamp', 'Staff_Name', 'Staff_Role', 'Action', 'Target_Type', 'Target_ID', 'Details']
@@ -862,7 +873,7 @@ def trigger_live_audit_sync(audit_log) -> None:
             return
         ts = getattr(audit_log, 'timestamp', None) or datetime.utcnow()
         payload = {
-            'date': ts.strftime('%Y-%m-%d') if hasattr(ts, 'strftime') else datetime.now().strftime('%Y-%m-%d'),
+            'date': ts.strftime('%Y-%m-%d') if hasattr(ts, 'strftime') else _manila_now().strftime('%Y-%m-%d'),
             'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
             'staff_name': str(getattr(audit_log, 'staff_name_snapshot', '') or 'SYSTEM'),
             'staff_role': str(getattr(audit_log, 'staff_role_snapshot', '') or 'Staff'),
@@ -876,20 +887,389 @@ def trigger_live_audit_sync(audit_log) -> None:
         logger.warning(f"Could not dispatch live audit sync: {exc}")
 
 
+def _upsert_drive_csv(
+    folder_id: str,
+    filename: str,
+    csv_headers: list[str],
+    rows: list[list],
+    lock: threading.Lock,
+) -> None:
+    """Creates or overwrites a snapshot CSV mirror in Drive without creating duplicate files."""
+    creds = _get_credentials()
+    if not creds or not creds.token or not folder_id:
+        return
+
+    out_buf = io.StringIO()
+    writer = csv.writer(out_buf, lineterminator='\n')
+    writer.writerow(csv_headers)
+    writer.writerows(rows)
+    csv_text = out_buf.getvalue()
+    csv_bytes = csv_text.encode('utf-8')
+
+    with lock:
+        q = f"'{folder_id}' in parents and name = '{filename}' and trashed = false"
+        search_resp = http_requests.get(
+            'https://www.googleapis.com/drive/v3/files',
+            params={'q': q, 'fields': 'files(id,name,mimeType)', 'pageSize': 10},
+            headers={'Authorization': f'Bearer {creds.token}'},
+            timeout=10,
+        )
+        items = (search_resp.json() or {}).get('files', []) if search_resp.status_code == 200 else []
+        real_file = next((f for f in items if f.get('mimeType') != _FOLDER_MIME), None)
+        legacy_folder = next((f for f in items if f.get('mimeType') == _FOLDER_MIME), None)
+
+        if _using_user_oauth(creds):
+            if real_file:
+                if _update_drive_file(creds, real_file['id'], csv_bytes, 'text/csv'):
+                    _MEDIA_CACHE.pop(real_file['id'], None)
+            else:
+                _upload_drive_file(
+                    creds, filename, csv_bytes, 'text/csv', folder_id,
+                    description=f"CURA Live Report Mirror: {filename}",
+                )
+            return
+
+        headers = {'Authorization': f'Bearer {creds.token}', 'Content-Type': 'application/json'}
+        if legacy_folder:
+            http_requests.patch(
+                f"https://www.googleapis.com/drive/v3/files/{legacy_folder['id']}?fields=id",
+                headers=headers,
+                json={'description': csv_text[:24800]},
+                timeout=10,
+            )
+            _MEDIA_CACHE.pop(legacy_folder['id'], None)
+        else:
+            http_requests.post(
+                'https://www.googleapis.com/drive/v3/files?fields=id',
+                headers=headers,
+                json={
+                    'name': filename,
+                    'mimeType': _FOLDER_MIME,
+                    'parents': [folder_id],
+                    'description': csv_text[:24800],
+                },
+                timeout=10,
+            )
+
+
+def _mirror_lock(key: str) -> threading.Lock:
+    with _MIRROR_SCHED_LOCK:
+        return _MIRROR_LOCKS.setdefault(key, threading.Lock())
+
+
+def _dedup_month_consultations(year: int, month: int):
+    from .models import Consultation
+    rows = Consultation.objects.select_related('patient').prefetch_related('treatments').filter(
+        date__year=year, date__month=month
+    ).order_by('date', 'timeIn')
+    seen_ids, seen_sem, kept = set(), set(), []
+    for c in rows:
+        complaint = (c.complaint or '').strip()
+        if complaint.startswith('[CONVERTED]'):
+            continue
+        cid = str(c.id)
+        sem = (str(c.patient_id), str(c.date)[:10], str(c.timeIn or ''), complaint, str(c.status or ''))
+        if cid in seen_ids or sem in seen_sem:
+            continue
+        seen_ids.add(cid)
+        seen_sem.add(sem)
+        kept.append(c)
+    return kept
+
+
+def _mirror_patients() -> None:
+    from .models import Patient
+    rows = [
+        [
+            p.id, p.name, p.category, p.studentCategory or '',
+            p.course or p.department or p.position or '',
+            p.yearLevel or p.gradeLevel or '', p.sex or '', p.age,
+            str(p.birthday or ''), p.contact, p.email or '',
+            p.guardianName or '', p.emergencyContact or '', p.emergencyPhone or '',
+            p.address or '',
+        ]
+        for p in Patient.objects.all().order_by('name')
+    ]
+    _upsert_drive_csv(
+        SUBFOLDER_IDS['patients'], 'Patients_Masterlist.csv',
+        ['Patient_ID', 'Name', 'Category', 'Student_Level', 'Course_Dept_Position',
+         'Year_Grade', 'Sex', 'Age', 'Birthday', 'Contact', 'Email', 'Guardian',
+         'Emergency_Contact', 'Emergency_Phone', 'Address'],
+        rows, _mirror_lock('patients'),
+    )
+
+
+def _mirror_daily_report() -> None:
+    now = _manila_now()
+    cons_list = _dedup_month_consultations(now.year, now.month)
+    by_day: dict[int, list] = {}
+    for c in cons_list:
+        day_num = c.date.day if hasattr(c.date, 'day') else int(str(c.date)[8:10])
+        by_day.setdefault(day_num, []).append(c)
+
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    mon_abbr = now.strftime('%b')
+    yr_short = now.strftime('%y')
+    rows, totals = [], [0] * 11
+    for day in range(1, days_in_month + 1):
+        col = shs = jhs = gs = emp = vis = cons = home = hosp = pre = 0
+        for c in by_day.get(day, ()):
+            p = getattr(c, 'patient', None)
+            if p:
+                if p.category == 'Student':
+                    sc = p.studentCategory or ''
+                    if sc == 'College': col += 1
+                    elif sc == 'Senior High School': shs += 1
+                    elif sc == 'Junior High School': jhs += 1
+                    elif sc == 'Elementary': gs += 1
+                elif p.category == 'Employee':
+                    emp += 1
+                elif p.category == 'Outsider':
+                    vis += 1
+            if c.status == 'Consultation':
+                cons += 1
+            if c.earlyDismissal and c.dismissalDestination == 'Sent Home':
+                home += 1
+            if (c.earlyDismissal and c.dismissalDestination == 'Sent to Hospital') or c.transferred:
+                hosp += 1
+            purpose = (c.purposeOfVisit or c.complaint or '').lower()
+            if 'pre-employment' in purpose or 'pre employment' in purpose:
+                pre += 1
+        total = col + shs + jhs + gs + emp + vis
+        vals = [col, shs, jhs, gs, emp, total, cons, home, hosp, pre, vis]
+        for idx, v in enumerate(vals):
+            totals[idx] += v
+        rows.append([f"{day}-{mon_abbr}-{yr_short}", *[v or '' if i != 5 else v for i, v in enumerate(vals)]])
+    rows.append(['TOTAL', *totals])
+
+    _upsert_drive_csv(
+        SUBFOLDER_IDS['live_reports'], f"Daily_Report_{now.strftime('%Y-%m')}.csv",
+        ['DATE', 'COLLEGE', 'SHS', 'JHS', 'GS', 'EMPLOYEE', 'TOTAL',
+         'CONSULTATION', 'SENT HOME', 'SENT TO HOSPITAL', 'PRE-EMPLOYMENT', 'VISITOR'],
+        rows, _mirror_lock('daily_report'),
+    )
+
+
+def _mirror_cases_attended() -> None:
+    now = _manila_now()
+    counts: dict[str, list[int]] = {}
+    for c in _dedup_month_consultations(now.year, now.month):
+        p = getattr(c, 'patient', None)
+        is_student = bool(p and p.category == 'Student')
+        labels = [str(x).strip() for x in (c.categories or []) if str(x).strip()]
+        if not labels and (c.complaint or '').strip():
+            labels = [c.complaint.strip()]
+        for lbl in labels:
+            bucket = counts.setdefault(lbl, [0, 0])
+            bucket[0 if is_student else 1] += 1
+
+    sorted_items = sorted(counts.items(), key=lambda kv: (-(kv[1][0] + kv[1][1]), kv[0].lower()))
+    stu_sum = sum(v[0] for _, v in sorted_items)
+    per_sum = sum(v[1] for _, v in sorted_items)
+    rows = [[lbl, v[0], v[1], v[0] + v[1]] for lbl, v in sorted_items]
+    rows.append(['TOTAL CASES ATTENDED', stu_sum, per_sum, stu_sum + per_sum])
+
+    _upsert_drive_csv(
+        SUBFOLDER_IDS['live_reports'], f"Cases_Attended_{now.strftime('%Y-%m')}.csv",
+        ['Cases_or_Complaints', 'Student', 'Personnel', 'Total'],
+        rows, _mirror_lock('cases_attended'),
+    )
+
+
+def _mirror_non_consultations() -> None:
+    from .models import Consultation
+    qs = Consultation.objects.select_related('patient').prefetch_related('treatments').filter(
+        status='Non-Consultation'
+    ).order_by('-date', '-timeIn')[:2000]
+    rows = []
+    for c in qs:
+        if (c.complaint or '').startswith('[CONVERTED]'):
+            continue
+        p = getattr(c, 'patient', None)
+        treats = list(c.treatments.all())
+        items_str = ', '.join(t.medicineName for t in treats) if treats else 'BP measurement / Rest'
+        qty_sum = sum(t.quantity for t in treats) if treats else '-'
+        rows.append([
+            str(c.date), str(c.timeIn or ''), str(c.patient_id), p.name if p else '',
+            p.category if p else '', c.complaint or c.purposeOfVisit or '',
+            items_str, qty_sum, c.assistingNurse or c.doctorName or 'Nurse',
+        ])
+    _upsert_drive_csv(
+        SUBFOLDER_IDS['live_reports'], 'Non_Consultation_Report.csv',
+        ['Date', 'Time_In', 'Patient_ID', 'Patient_Name', 'Category',
+         'Reason_Complaint', 'Item_or_Service', 'Qty', 'Dispensed_By'],
+        rows, _mirror_lock('non_consultation'),
+    )
+
+
+def _mirror_inventory() -> None:
+    from .models import MedicineItem, StockHistory
+    med_rows = []
+    for m in MedicineItem.objects.prefetch_related('stockHistory').all().order_by('category', 'name'):
+        hist_dispensed = sum(h.qty for h in m.stockHistory.all() if h.type == 'dispense')
+        med_rows.append([
+            str(m.id), m.name, m.category, m.unit,
+            m.beginningQty if m.beginningQty is not None else '',
+            m.stock, max(m.dispensed or 0, hist_dispensed),
+            m.threshold, m.status, m.batchNumber or '', str(m.dateAdded)[:10],
+        ])
+    _upsert_drive_csv(
+        SUBFOLDER_IDS['live_reports'], 'Inventory_Medicines.csv',
+        ['Medicine_ID', 'Name', 'Category', 'Unit', 'Beginning_Qty',
+         'Current_Stock', 'Total_Dispensed', 'Threshold', 'Status', 'Batch_Number', 'Date_Added'],
+        med_rows, _mirror_lock('inventory_meds'),
+    )
+
+    hist_rows = [
+        [str(h.date)[:19], str(h.medicine_id), h.medicine.name, h.medicine.category, h.type, h.qty, h.note or '']
+        for h in StockHistory.objects.select_related('medicine').all().order_by('-date')[:2000]
+    ]
+    _upsert_drive_csv(
+        SUBFOLDER_IDS['live_reports'], 'Inventory_Stock_History.csv',
+        ['Date_Time', 'Medicine_ID', 'Medicine_Name', 'Category', 'Type', 'Qty', 'Note'],
+        hist_rows, _mirror_lock('inventory_hist'),
+    )
+
+
+def _mirror_purchase_requests() -> None:
+    from .models import PurchaseRequest
+    rows = [
+        [
+            str(r.id), str(r.date), r.medicine, r.description or '', r.unit or '',
+            r.requestedQty, r.receivedQty, str(r.unitPrice) if r.unitPrice is not None else '',
+            r.prfNo or '', r.status,
+        ]
+        for r in PurchaseRequest.objects.all().order_by('-date', 'medicine')[:2000]
+    ]
+    _upsert_drive_csv(
+        SUBFOLDER_IDS['live_reports'], 'Purchase_Requests.csv',
+        ['Request_ID', 'Date', 'Medicine', 'Description', 'Unit',
+         'Requested_Qty', 'Received_Qty', 'Unit_Price', 'PRF_No', 'Status'],
+        rows, _mirror_lock('purchases'),
+    )
+
+
+def _mirror_appointments() -> None:
+    from .models import AppointmentRequest
+    rows = [
+        [
+            str(r.id), str(r.patient_id), r.patient.name if r.patient else '',
+            r.patient.category if r.patient else '', r.visit_type, r.reason,
+            str(r.preferred_date), r.preferred_time,
+            str(r.scheduled_date or ''), r.scheduled_time or '',
+            r.status, str(r.updated_at)[:19],
+        ]
+        for r in AppointmentRequest.objects.select_related('patient').all().order_by('-created_at')[:2000]
+    ]
+    _upsert_drive_csv(
+        SUBFOLDER_IDS['live_reports'], 'Appointments_Report.csv',
+        ['Appointment_ID', 'Patient_ID', 'Patient_Name', 'Category', 'Visit_Type',
+         'Reason', 'Preferred_Date', 'Preferred_Time', 'Scheduled_Date', 'Scheduled_Time',
+         'Status', 'Updated_At'],
+        rows, _mirror_lock('appointments'),
+    )
+
+
+def _mirror_telemedicine() -> None:
+    from .models import TelemedicineRequest
+    rows = [
+        [
+            str(r.id), str(r.patient_id), r.patient.name if r.patient else '',
+            r.patient.category if r.patient else '', r.reason,
+            str(r.preferred_date), r.preferred_time,
+            str(r.scheduled_date or ''), r.scheduled_time or '',
+            r.meeting_link or '', r.status, str(r.updated_at)[:19],
+        ]
+        for r in TelemedicineRequest.objects.select_related('patient').all().order_by('-created_at')[:2000]
+    ]
+    _upsert_drive_csv(
+        SUBFOLDER_IDS['live_reports'], 'Telemedicine_Report.csv',
+        ['Telemed_ID', 'Patient_ID', 'Patient_Name', 'Category', 'Reason',
+         'Preferred_Date', 'Preferred_Time', 'Scheduled_Date', 'Scheduled_Time',
+         'Meeting_Link', 'Status', 'Updated_At'],
+        rows, _mirror_lock('telemedicine'),
+    )
+
+
+def _mirror_medical_certificates() -> None:
+    from .models import MedicalCertificate
+    rows = [
+        [
+            str(r.id), str(r.date), str(r.patient_id), r.patient.name if r.patient else '',
+            r.purpose, r.diagnosis or '', r.recommendation or '',
+            r.doctor or '', r.issuedBy or '', r.notes or '',
+        ]
+        for r in MedicalCertificate.objects.select_related('patient').all().order_by('-date')[:2000]
+    ]
+    _upsert_drive_csv(
+        SUBFOLDER_IDS['live_reports'], 'Medical_Certificates.csv',
+        ['Certificate_ID', 'Date', 'Patient_ID', 'Patient_Name', 'Purpose',
+         'Diagnosis', 'Recommendation', 'Doctor', 'Issued_By', 'Notes'],
+        rows, _mirror_lock('medcerts'),
+    )
+
+
+_MIRRORS = {
+    'patients': _mirror_patients,
+    'daily_report': _mirror_daily_report,
+    'cases_attended': _mirror_cases_attended,
+    'non_consultation': _mirror_non_consultations,
+    'inventory': _mirror_inventory,
+    'purchases': _mirror_purchase_requests,
+    'appointments': _mirror_appointments,
+    'telemedicine': _mirror_telemedicine,
+    'medcerts': _mirror_medical_certificates,
+}
+
+
+def run_mirror(key: str) -> None:
+    fn = _MIRRORS.get(key)
+    if not fn:
+        return
+    try:
+        fn()
+    except Exception as exc:
+        logger.warning(f"Live Drive mirror '{key}' warning: {exc}")
+
+
+# ponytail: 1.5s process-local debounce timers + single lock per mirror key; use Celery/Redis if horizontally scaled
+def schedule_mirror(*keys: str, delay: float = 1.5) -> None:
+    for key in keys:
+        if key not in _MIRRORS:
+            continue
+        with _MIRROR_SCHED_LOCK:
+            prev = _MIRROR_TIMERS.pop(key, None)
+            if prev is not None:
+                prev.cancel()
+            timer = threading.Timer(delay, run_mirror, args=(key,))
+            timer.daemon = True
+            _MIRROR_TIMERS[key] = timer
+            timer.start()
+
+
+def sync_all_report_mirrors() -> None:
+    for key in _MIRRORS:
+        run_mirror(key)
+
+
 _ARCHIVE_FOLDER_LABELS = {
+    'live_reports': 'Reports (Live Auto-Sync)',
     'live_logs': 'Consultations (Daily Log)',
-    'archives': 'Reports & Archives',
+    'archives': 'Reports (Exported Excel)',
+    'patients': 'Patients (Masterlist)',
     'audit_logs': 'Settings (Audit Logs)',
 }
 
 
-def list_drive_archives(folder_keys: tuple[str, ...] = ('live_logs', 'archives')) -> list[dict]:
+def list_drive_archives(folder_keys: tuple[str, ...] = ('live_reports', 'live_logs', 'archives', 'patients')) -> list[dict]:
     """Lists Drive backup folders/files from the requested SUBFOLDER_IDS keys."""
+    global _SEEDED_MIRRORS
     creds = _get_credentials()
     if not creds or not creds.token:
         return []
 
     results: list[dict] = []
+    live_reports_count = 0
     for folder_key in folder_keys:
         folder_id = SUBFOLDER_IDS.get(folder_key)
         folder_label = _ARCHIVE_FOLDER_LABELS.get(folder_key, folder_key)
@@ -913,6 +1293,9 @@ def list_drive_archives(folder_keys: tuple[str, ...] = ('live_logs', 'archives')
             for f in (resp.json() or {}).get('files', []):
                 desc = f.get('description') or ''
                 file_mime = f.get('mimeType') or ''
+                fname = f.get('name', 'Archive')
+                if file_mime == _FOLDER_MIME and not fname.endswith(('.csv', '.json', '.xlsx')) and not desc.startswith(('CURA_ZLIB:', 'CURA_ZLIB_MULTI:')):
+                    continue
                 sha = ''
                 if desc.startswith(('CURA_ZLIB:', 'CURA_ZLIB_MULTI:')):
                     parts = desc.split(':', 3)
@@ -923,9 +1306,11 @@ def list_drive_archives(folder_keys: tuple[str, ...] = ('live_logs', 'archives')
                 elif desc:
                     sha = hashlib.sha256(desc.encode('utf-8')).hexdigest()[:16]
                 fid = f['id']
+                if folder_key == 'live_reports':
+                    live_reports_count += 1
                 results.append({
                     'id': fid,
-                    'name': f.get('name', 'Archive'),
+                    'name': fname,
                     'category': folder_label,
                     'folder_key': folder_key,
                     'sha256': sha,
@@ -935,5 +1320,11 @@ def list_drive_archives(folder_keys: tuple[str, ...] = ('live_logs', 'archives')
                 })
         except Exception as exc:
             logger.warning(f"Failed listing {folder_key}: {exc}")
+
+    if 'live_reports' in folder_keys and live_reports_count == 0 and not _SEEDED_MIRRORS:
+        with _MIRROR_SCHED_LOCK:
+            if not _SEEDED_MIRRORS:
+                _SEEDED_MIRRORS = True
+                threading.Thread(target=sync_all_report_mirrors, daemon=True).start()
 
     return results

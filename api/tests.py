@@ -115,5 +115,64 @@ class DriveOAuthTests(unittest.TestCase):
             self.assertTrue(out.endswith('/api/media/img_1/'))
             self.assertIn(b'_2023001322_DELA_CRUZ_Prescription.webp', posted['data'])
 
+    def test_upsert_drive_csv_creates_and_overwrites_in_place(self):
+        creds = gs.UserCredentials(token='t', refresh_token='r', token_uri='https://oauth2.googleapis.com/token', client_id='c', client_secret='s')
+        gs._CREDS = creds
+        posted, patched = {}, {}
+
+        def mock_get_empty(url, params=None, headers=None, timeout=None):
+            r = MagicMock(status_code=200)
+            r.json.return_value = {'files': []}
+            return r
+
+        def mock_post(url, headers=None, data=None, json=None, timeout=None):
+            posted['data'] = data
+            r = MagicMock(status_code=200)
+            r.json.return_value = {'id': 'm1'}
+            return r
+
+        with patch('api.gdrive_service.http_requests.get', side_effect=mock_get_empty), \
+             patch('api.gdrive_service.http_requests.post', side_effect=mock_post):
+            gs._upsert_drive_csv('lr_dir', 'Appointments_Report.csv', ['ID', 'Status'], [['a1', 'Pending']], gs._mirror_lock('t_up'))
+            self.assertIn(b'ID,Status\na1,Pending\n', posted['data'])
+
+        def mock_get_exists(url, params=None, headers=None, timeout=None):
+            r = MagicMock(status_code=200)
+            r.json.return_value = {'files': [{'id': 'm1', 'name': 'Appointments_Report.csv', 'mimeType': 'text/csv'}]}
+            return r
+
+        def mock_patch(url, headers=None, data=None, json=None, timeout=None):
+            patched['url'], patched['data'] = url, data
+            return MagicMock(status_code=200)
+
+        with patch('api.gdrive_service.http_requests.get', side_effect=mock_get_exists), \
+             patch('api.gdrive_service.http_requests.patch', side_effect=mock_patch):
+            gs._upsert_drive_csv('lr_dir', 'Appointments_Report.csv', ['ID', 'Status'], [['a1', 'Approved']], gs._mirror_lock('t_up'))
+            self.assertIn('m1?uploadType=media', patched['url'])
+            self.assertEqual(patched['data'], b'ID,Status\na1,Approved\n')
+
+    def test_list_drive_archives_skips_plain_folders_and_schedule_mirror_debounces(self):
+        creds = gs.UserCredentials(token='t', refresh_token='r', token_uri='https://oauth2.googleapis.com/token', client_id='c', client_secret='s')
+        gs._CREDS = creds
+
+        def mock_get(url, params=None, headers=None, timeout=None):
+            r = MagicMock(status_code=200)
+            r.json.return_value = {'files': [
+                {'id': 'sub_dir', 'name': 'Patient Profile Photos', 'mimeType': gs._FOLDER_MIME, 'description': 'Patient profile photos', 'createdTime': '2026-11-13T09:00:00Z'},
+                {'id': 'csv_1', 'name': 'Patients_Masterlist.csv', 'mimeType': 'text/csv', 'description': '', 'createdTime': '2026-11-13T09:01:00Z'},
+            ]}
+            return r
+
+        with patch('api.gdrive_service.http_requests.get', side_effect=mock_get):
+            items = gs.list_drive_archives(('patients',))
+            self.assertEqual([x['name'] for x in items], ['Patients_Masterlist.csv'])
+            self.assertEqual(items[0]['category'], 'Patients (Masterlist)')
+
+        ran = []
+        with patch.dict(gs._MIRRORS, {'appointments': lambda: ran.append('appointments')}):
+            gs.schedule_mirror('appointments', 'appointments', delay=0.05)
+            gs.time.sleep(0.15)
+            self.assertEqual(ran, ['appointments'])
+
 
 

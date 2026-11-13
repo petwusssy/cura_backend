@@ -26,7 +26,7 @@ SUBFOLDER_IDS = {
     'archives': '19PlSdFmCDCKLnt0dvDyRLo40COrTYwLQ',
     'audit_logs': os.environ.get('GOOGLE_DRIVE_AUDIT_FOLDER_ID', '1qRJu1lh8pOmwJ8W_ugpc_OEt8ML7cnie'),
 }
-BACKEND_PUBLIC_URL = os.environ.get('BACKEND_PUBLIC_URL', 'https://cura-backend-dtfj.onrender.com').rstrip('/')
+BACKEND_PUBLIC_URL = os.environ.get('BACKEND_PUBLIC_URL', 'https://cura-backend-dvj5.onrender.com').rstrip('/')
 
 # ponytail: in-process dict cache (512 items), swap for Redis/CDN only if multi-worker memory matters
 _MEDIA_CACHE: dict[str, tuple[bytes, str]] = {}

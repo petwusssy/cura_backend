@@ -1,0 +1,15 @@
+name: Keep Supabase Alive
+
+on:
+  schedule:
+    # Ping once every 12h so Supabase Free Tier stays active (<7d pause rule)
+    # without exhausting Render Free Tier hours (~15h/mo out of 750h).
+    - cron: '0 0,12 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake Render dvj5 and query Supabase
+        run: curl -fsS --max-time 120 --retry 1 --retry-delay 5 https://cura-backend-dvj5.onrender.com/api/staff/ >/dev/null

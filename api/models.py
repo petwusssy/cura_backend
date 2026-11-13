@@ -38,7 +38,8 @@ class Patient(models.Model):
             self.emergencyContact = self.emergencyContact.strip().upper()
         if self.avatar and str(self.avatar).strip().startswith('data:image/'):
             from .gdrive_service import offload_image
-            self.avatar = offload_image(self.avatar, category='avatar', label=self.id or self.name or 'patient')
+            label = f"{self.id}_{self.name}".strip('_') if self.id or self.name else 'patient'
+            self.avatar = offload_image(self.avatar, category='avatar', label=label)
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -78,10 +79,12 @@ class Consultation(models.Model):
 
     def save(self, *args, **kwargs):
         from .gdrive_service import offload_image
+        patient = getattr(self, 'patient', None) if self.patient_id else None
+        patient_label = f"{self.patient_id}_{getattr(patient, 'name', '')}".strip('_') if self.patient_id else ''
         if self.prescriptionImage and str(self.prescriptionImage).strip().startswith('data:image/'):
-            self.prescriptionImage = offload_image(self.prescriptionImage, category='prescription', label=self.patient_id or 'rx')
+            self.prescriptionImage = offload_image(self.prescriptionImage, category='prescription', label=patient_label or 'rx')
         if self.fetcherIdImage and str(self.fetcherIdImage).strip().startswith('data:image/'):
-            self.fetcherIdImage = offload_image(self.fetcherIdImage, category='fetcher_id', label=self.patient_id or 'id')
+            self.fetcherIdImage = offload_image(self.fetcherIdImage, category='fetcher_id', label=patient_label or 'id')
         super().save(*args, **kwargs)
 
     def __str__(self):

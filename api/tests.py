@@ -1,6 +1,8 @@
+import io
 import os
 import unittest
 from unittest.mock import MagicMock, patch
+from PIL import Image
 from api import gdrive_service as gs
 
 
@@ -94,5 +96,24 @@ class DriveOAuthTests(unittest.TestCase):
             gs._append_daily_csv_oauth(creds, 'audit_dir', 'Audit_Trail_2026-11-13.csv', ['A', 'B'], ['5', '6'], gs._AUDIT_LOCK)
             self.assertIn('new_csv?uploadType=media', patched['url'])
             self.assertEqual(patched['data'], b'A,B\n1,2\n3,4\n5,6\n')
+
+    def test_offload_image_uses_readable_patient_filename(self):
+        creds = gs.UserCredentials(token='t', refresh_token='r', token_uri='https://oauth2.googleapis.com/token', client_id='c', client_secret='s')
+        gs._CREDS = creds
+        buf = io.BytesIO()
+        Image.new('RGB', (10, 10), (10, 20, 30)).save(buf, format='PNG')
+        posted = {}
+
+        def mock_post(url, headers=None, data=None, json=None, timeout=None):
+            posted['data'] = data
+            r = MagicMock(status_code=200)
+            r.json.return_value = {'id': 'img_1'}
+            return r
+
+        with patch('api.gdrive_service.http_requests.post', side_effect=mock_post):
+            out = gs.offload_image(buf.getvalue(), category='prescription', label='2023001322_DELA CRUZ')
+            self.assertTrue(out.endswith('/api/media/img_1/'))
+            self.assertIn(b'_2023001322_DELA_CRUZ_Prescription.webp', posted['data'])
+
 
 

@@ -9,7 +9,7 @@ import threading
 import time
 import zlib
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
 import requests as http_requests
 from PIL import Image
@@ -313,6 +313,13 @@ def _append_daily_csv_oauth(
             _upload_drive_file(creds, filename, csv_bytes, 'text/csv', folder_id)
 
 
+_IMAGE_TAG_LABELS = {
+    'avatar': 'Photo',
+    'prescription': 'Prescription',
+    'fetcher_id': 'FetcherID',
+}
+
+
 def offload_image(value: str | bytes | None, category: str = 'avatar', label: str = 'media') -> str | None:
     """
     Offloads a data:image/...;base64 string or raw image bytes to Google Drive (CURA_CLINIC_STORAGE)
@@ -341,8 +348,10 @@ def offload_image(value: str | bytes | None, category: str = 'avatar', label: st
             return data_uri
 
         parent_id = SUBFOLDER_IDS.get(category, ROOT_FOLDER_ID)
-        safe_label = ''.join(c if c.isalnum() or c in ('-', '_') else '_' for c in str(label))[:40]
-        filename = f"{category}_{safe_label}_{int(time.time())}.webp"
+        manila_stamp = datetime.now(dt_timezone(timedelta(hours=8))).strftime('%Y-%m-%d_%H%M%S')
+        safe_label = '_'.join(''.join(c if c.isalnum() or c in ('-', '_') else ' ' for c in str(label)).split())[:45] or 'Record'
+        type_tag = _IMAGE_TAG_LABELS.get(category, category)
+        filename = f"{manila_stamp}_{safe_label}_{type_tag}.webp"
 
         drive_id = None
         if _using_user_oauth(creds):
@@ -868,9 +877,9 @@ def trigger_live_audit_sync(audit_log) -> None:
 
 
 _ARCHIVE_FOLDER_LABELS = {
-    'live_logs': 'Live Daily Log',
-    'archives': 'Official Report Archive',
-    'audit_logs': 'Audit Log Backup',
+    'live_logs': 'Consultations (Daily Log)',
+    'archives': 'Reports & Archives',
+    'audit_logs': 'Settings (Audit Logs)',
 }
 
 

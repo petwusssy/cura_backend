@@ -8,11 +8,13 @@ import os
 import threading
 import time
 import zlib
+import uuid
 from datetime import datetime
 from pathlib import Path
 import requests as http_requests
 from PIL import Image
 from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials as UserCredentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
 logger = logging.getLogger(__name__)
@@ -27,12 +29,14 @@ SUBFOLDER_IDS = {
     'audit_logs': os.environ.get('GOOGLE_DRIVE_AUDIT_FOLDER_ID', '1qRJu1lh8pOmwJ8W_ugpc_OEt8ML7cnie'),
 }
 BACKEND_PUBLIC_URL = os.environ.get('BACKEND_PUBLIC_URL', 'https://cura-backend-dvj5.onrender.com').rstrip('/')
+_FOLDER_MIME = 'application/vnd.google-apps.folder'
 
 # ponytail: in-process dict cache (512 items), swap for Redis/CDN only if multi-worker memory matters
 _MEDIA_CACHE: dict[str, tuple[bytes, str]] = {}
 _CREDS = None
 _LOCK = threading.Lock()
 _AUDIT_LOCK = threading.Lock()
+_CONSULT_LOCK = threading.Lock()
 
 
 def _load_db_credentials_json() -> dict | None:
@@ -67,13 +71,44 @@ def set_runtime_credentials(info: dict) -> bool:
     return True
 
 
+def _using_user_oauth(creds) -> bool:
+    return isinstance(creds, UserCredentials)
+
+
 def _get_credentials():
     global _CREDS
     with _LOCK:
         if _CREDS is not None:
             if not _CREDS.valid:
-                _CREDS.refresh(GoogleAuthRequest())
-            return _CREDS
+                try:
+                    _CREDS.refresh(GoogleAuthRequest())
+                except Exception as exc:
+                    logger.warning(f"Failed refreshing cached Drive credentials: {exc}")
+                    _CREDS = None
+            if _CREDS is not None:
+                return _CREDS
+
+        oauth_client_id = os.environ.get('GOOGLE_OAUTH_CLIENT_ID', '').strip()
+        oauth_client_secret = os.environ.get('GOOGLE_OAUTH_CLIENT_SECRET', '').strip()
+        oauth_refresh_token = os.environ.get('GOOGLE_OAUTH_REFRESH_TOKEN', '').strip()
+        if any((oauth_client_id, oauth_client_secret, oauth_refresh_token)):
+            if not all((oauth_client_id, oauth_client_secret, oauth_refresh_token)):
+                logger.warning("Incomplete GOOGLE_OAUTH_* env vars; falling back to service account")
+            else:
+                try:
+                    creds = UserCredentials(
+                        token=None,
+                        refresh_token=oauth_refresh_token,
+                        token_uri='https://oauth2.googleapis.com/token',
+                        client_id=oauth_client_id,
+                        client_secret=oauth_client_secret,
+                        scopes=['https://www.googleapis.com/auth/drive'],
+                    )
+                    creds.refresh(GoogleAuthRequest())
+                    _CREDS = creds
+                    return _CREDS
+                except Exception as exc:
+                    logger.warning(f"OAuth2 Drive auth failed, falling back to service account: {exc}")
 
         raw = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON', '').strip()
         info = None
@@ -100,11 +135,84 @@ def _get_credentials():
         if not info:
             return None
 
-        _CREDS = service_account.Credentials.from_service_account_info(
-            info, scopes=['https://www.googleapis.com/auth/drive']
-        )
-        _CREDS.refresh(GoogleAuthRequest())
-        return _CREDS
+        try:
+            creds = service_account.Credentials.from_service_account_info(
+                info, scopes=['https://www.googleapis.com/auth/drive']
+            )
+            creds.refresh(GoogleAuthRequest())
+            _CREDS = creds
+            return _CREDS
+        except Exception as exc:
+            logger.warning(f"Service account Drive auth failed: {exc}")
+            return None
+
+
+def _base_mime(mime_type: str) -> str:
+    return (mime_type or 'application/octet-stream').split(';', 1)[0].strip() or 'application/octet-stream'
+
+
+def _drive_url(drive_id: str, mime_type: str = '') -> str:
+    if mime_type and mime_type != _FOLDER_MIME:
+        return f"https://drive.google.com/file/d/{drive_id}/view"
+    return f"https://drive.google.com/drive/folders/{drive_id}"
+
+
+def _upload_drive_file(
+    creds,
+    name: str,
+    raw_bytes: bytes,
+    mime_type: str,
+    parent_id: str,
+    description: str = '',
+    fields: str = 'id',
+) -> dict | None:
+    """Uploads a real binary/text file using the OAuth user's My Drive quota."""
+    clean_mime = _base_mime(mime_type)
+    meta = {'name': name, 'parents': [parent_id], 'mimeType': clean_mime}
+    if description:
+        meta['description'] = description[:2000]
+    boundary = f"cura_{uuid.uuid4().hex}"
+    body = (
+        f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
+        f"{json.dumps(meta)}\r\n"
+        f"--{boundary}\r\nContent-Type: {clean_mime}\r\n\r\n"
+    ).encode('utf-8') + raw_bytes + f"\r\n--{boundary}--\r\n".encode('utf-8')
+    resp = http_requests.post(
+        f"https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields={fields}",
+        headers={
+            'Authorization': f'Bearer {creds.token}',
+            'Content-Type': f'multipart/related; boundary={boundary}',
+        },
+        data=body,
+        timeout=20,
+    )
+    if resp.status_code == 200:
+        return resp.json()
+    logger.warning(f"Google Drive multipart upload failed ({resp.status_code}): {resp.text[:200]}")
+    return None
+
+
+def _update_drive_file(creds, file_id: str, raw_bytes: bytes, mime_type: str) -> bool:
+    clean_mime = _base_mime(mime_type)
+    resp = http_requests.patch(
+        f"https://www.googleapis.com/upload/drive/v3/files/{file_id}?uploadType=media&fields=id",
+        headers={'Authorization': f'Bearer {creds.token}', 'Content-Type': clean_mime},
+        data=raw_bytes,
+        timeout=20,
+    )
+    if resp.status_code != 200:
+        logger.warning(f"Google Drive media update failed ({resp.status_code}): {resp.text[:200]}")
+        return False
+    return True
+
+
+def _read_drive_file_bytes(creds, file_id: str) -> bytes | None:
+    resp = http_requests.get(
+        f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media",
+        headers={'Authorization': f'Bearer {creds.token}'},
+        timeout=20,
+    )
+    return resp.content if resp.status_code == 200 else None
 
 
 def compress_image_bytes(raw_bytes: bytes, category: str = 'avatar') -> tuple[bytes, str, str]:
@@ -154,6 +262,57 @@ def _extract_raw_bytes(value: str | bytes) -> bytes | None:
         return None
 
 
+def _cache_media(drive_id: str, raw_bytes: bytes, mime_type: str) -> None:
+    if len(_MEDIA_CACHE) >= 512:
+        _MEDIA_CACHE.pop(next(iter(_MEDIA_CACHE)))
+    _MEDIA_CACHE[drive_id] = (raw_bytes, mime_type)
+
+
+def _append_daily_csv_oauth(
+    creds,
+    folder_id: str,
+    filename: str,
+    csv_headers: list[str],
+    row_values: list,
+    lock: threading.Lock,
+) -> None:
+    """Appends one row to a real CSV file in Drive (creating/seeding from legacy folder if needed)."""
+    with lock:
+        q = f"'{folder_id}' in parents and name = '{filename}' and trashed = false"
+        search_resp = http_requests.get(
+            'https://www.googleapis.com/drive/v3/files',
+            params={'q': q, 'fields': 'files(id,name,mimeType,description)', 'pageSize': 10},
+            headers={'Authorization': f'Bearer {creds.token}'},
+            timeout=8,
+        )
+        items = (search_resp.json() or {}).get('files', []) if search_resp.status_code == 200 else []
+        real_file = next((f for f in items if f.get('mimeType') != _FOLDER_MIME), None)
+        legacy_folder = next((f for f in items if f.get('mimeType') == _FOLDER_MIME), None)
+
+        existing_csv = ''
+        if real_file:
+            raw_bytes = _read_drive_file_bytes(creds, real_file['id'])
+            if raw_bytes is not None:
+                existing_csv = raw_bytes.decode('utf-8', errors='replace')
+        elif legacy_folder:
+            existing_csv = legacy_folder.get('description') or ''
+
+        out_buf = io.StringIO()
+        writer = csv.writer(out_buf, lineterminator='\n')
+        if not existing_csv.strip():
+            writer.writerow(csv_headers)
+        writer.writerow(row_values)
+        new_chunk = out_buf.getvalue()
+        updated_csv = (existing_csv.rstrip('\r\n') + '\n' + new_chunk) if existing_csv.strip() else new_chunk
+        csv_bytes = updated_csv.encode('utf-8')
+
+        if real_file:
+            if _update_drive_file(creds, real_file['id'], csv_bytes, 'text/csv'):
+                _MEDIA_CACHE.pop(real_file['id'], None)
+        else:
+            _upload_drive_file(creds, filename, csv_bytes, 'text/csv', folder_id)
+
+
 def offload_image(value: str | bytes | None, category: str = 'avatar', label: str = 'media') -> str | None:
     """
     Offloads a data:image/...;base64 string or raw image bytes to Google Drive (CURA_CLINIC_STORAGE)
@@ -185,29 +344,36 @@ def offload_image(value: str | bytes | None, category: str = 'avatar', label: st
         safe_label = ''.join(c if c.isalnum() or c in ('-', '_') else '_' for c in str(label))[:40]
         filename = f"{category}_{safe_label}_{int(time.time())}.webp"
 
-        resp = http_requests.post(
-            'https://www.googleapis.com/drive/v3/files?fields=id',
-            headers={
-                'Authorization': f'Bearer {creds.token}',
-                'Content-Type': 'application/json',
-            },
-            json={
-                'name': filename,
-                'mimeType': 'application/vnd.google-apps.folder',
-                'parents': [parent_id],
-                'description': data_uri[:24900],
-            },
-            timeout=8,
-        )
-        if resp.status_code == 200:
-            drive_id = resp.json().get('id')
-            if drive_id:
-                if len(_MEDIA_CACHE) >= 512:
-                    _MEDIA_CACHE.pop(next(iter(_MEDIA_CACHE)))
-                _MEDIA_CACHE[drive_id] = (comp_bytes, mime_type)
-                return f"{BACKEND_PUBLIC_URL}/api/media/{drive_id}/"
+        drive_id = None
+        if _using_user_oauth(creds):
+            node = _upload_drive_file(
+                creds, filename, comp_bytes, mime_type, parent_id,
+                description=f"CURA {category}: {safe_label}",
+            )
+            drive_id = (node or {}).get('id')
         else:
-            logger.warning(f"Google Drive upload returned {resp.status_code}: {resp.text[:200]}")
+            resp = http_requests.post(
+                'https://www.googleapis.com/drive/v3/files?fields=id',
+                headers={
+                    'Authorization': f'Bearer {creds.token}',
+                    'Content-Type': 'application/json',
+                },
+                json={
+                    'name': filename,
+                    'mimeType': _FOLDER_MIME,
+                    'parents': [parent_id],
+                    'description': data_uri[:24900],
+                },
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                drive_id = resp.json().get('id')
+            else:
+                logger.warning(f"Google Drive upload returned {resp.status_code}: {resp.text[:200]}")
+
+        if drive_id:
+            _cache_media(drive_id, comp_bytes, mime_type)
+            return f"{BACKEND_PUBLIC_URL}/api/media/{drive_id}/"
     except Exception as exc:
         logger.warning(f"Google Drive offload fallback to compressed data URI: {exc}")
 
@@ -234,14 +400,20 @@ def fetch_media_from_drive(drive_id: str) -> tuple[bytes, str] | None:
         data = resp.json() or {}
         desc = data.get('description') or ''
         name = data.get('name') or 'archive.bin'
+        drive_mime = data.get('mimeType') or ''
+
+        if drive_mime and drive_mime != _FOLDER_MIME:
+            raw = _read_drive_file_bytes(creds, drive_id)
+            if raw is not None:
+                out_mime = f"{drive_mime}; charset=utf-8" if drive_mime.startswith('text/') else drive_mime
+                _cache_media(drive_id, raw, out_mime)
+                return raw, out_mime
 
         if desc.startswith('data:') and ';base64,' in desc:
             header, b64 = desc.split(';base64,', 1)
             mime_type = header.replace('data:', '') or 'application/octet-stream'
             raw = base64.b64decode(b64)
-            if len(_MEDIA_CACHE) >= 512:
-                _MEDIA_CACHE.pop(next(iter(_MEDIA_CACHE)))
-            _MEDIA_CACHE[drive_id] = (raw, mime_type)
+            _cache_media(drive_id, raw, mime_type)
             return raw, mime_type
 
         if desc.startswith(('CURA_ZLIB:', 'CURA_ZLIB_MULTI:')):
@@ -261,9 +433,7 @@ def fetch_media_from_drive(drive_id: str) -> tuple[bytes, str] | None:
                     chunks = sorted(c_resp.json().get('files', []), key=lambda x: x.get('name', ''))
                     b64_payload = ''.join((c.get('description') or '') for c in chunks)
             raw = zlib.decompress(base64.b64decode(b64_payload))
-            if len(_MEDIA_CACHE) >= 512:
-                _MEDIA_CACHE.pop(next(iter(_MEDIA_CACHE)))
-            _MEDIA_CACHE[drive_id] = (raw, mime_type)
+            _cache_media(drive_id, raw, mime_type)
             return raw, mime_type
 
         if desc:
@@ -285,73 +455,87 @@ def store_archive_file(
     report_title: str = 'Clinic Archive',
 ) -> dict | None:
     """
-    Stores an Excel/CSV/JSON report inside Google Drive (Medical_Archives or Live_Daily_Logs)
-    with SHA-256 integrity hash and zero Service Account quota usage.
+    Stores an Excel/CSV/JSON report inside Google Drive (Medical_Archives, Live_Daily_Logs, or Audit_Logs)
+    using real Drive files under OAuth2 user quota, or zero-quota folder nodes under Service Account fallback.
     """
     creds = _get_credentials()
     if not creds or not creds.token:
         return None
 
     sha256_hash = hashlib.sha256(raw_bytes).hexdigest()[:16]
-    compressed_b64 = base64.b64encode(zlib.compress(raw_bytes, level=9)).decode('ascii')
     parent_id = SUBFOLDER_IDS.get(folder_key, SUBFOLDER_IDS['archives'])
 
-    headers = {
-        'Authorization': f'Bearer {creds.token}',
-        'Content-Type': 'application/json',
-    }
-
-    if len(compressed_b64) <= 24000:
-        desc = f"CURA_ZLIB:{mime_type}:{sha256_hash}:{compressed_b64}"
-        resp = http_requests.post(
-            'https://www.googleapis.com/drive/v3/files?fields=id,name,createdTime',
-            headers=headers,
-            json={
-                'name': filename,
-                'mimeType': 'application/vnd.google-apps.folder',
-                'parents': [parent_id],
-                'description': desc,
-            },
-            timeout=10,
+    if _using_user_oauth(creds):
+        node = _upload_drive_file(
+            creds,
+            filename,
+            raw_bytes,
+            mime_type,
+            parent_id,
+            description=f"CURA Archive ({report_title}) by {staff_name} | sha256:{sha256_hash}",
+            fields='id,name,mimeType,createdTime',
         )
-        if resp.status_code != 200:
-            logger.warning(f"Failed to create Drive archive node: {resp.text[:200]}")
+        if not node:
             return None
-        node = resp.json()
+        node_mime = node.get('mimeType') or _base_mime(mime_type)
     else:
-        desc = f"CURA_ZLIB_MULTI:{mime_type}:{sha256_hash}:"
-        resp = http_requests.post(
-            'https://www.googleapis.com/drive/v3/files?fields=id,name,createdTime',
-            headers=headers,
-            json={
-                'name': filename,
-                'mimeType': 'application/vnd.google-apps.folder',
-                'parents': [parent_id],
-                'description': desc,
-            },
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            return None
-        node = resp.json()
-        parent_node_id = node['id']
-        chunk_size = 24000
-        for idx in range(0, len(compressed_b64), chunk_size):
-            chunk_str = compressed_b64[idx:idx + chunk_size]
-            http_requests.post(
-                'https://www.googleapis.com/drive/v3/files?fields=id',
+        compressed_b64 = base64.b64encode(zlib.compress(raw_bytes, level=9)).decode('ascii')
+        headers = {
+            'Authorization': f'Bearer {creds.token}',
+            'Content-Type': 'application/json',
+        }
+        if len(compressed_b64) <= 24000:
+            desc = f"CURA_ZLIB:{mime_type}:{sha256_hash}:{compressed_b64}"
+            resp = http_requests.post(
+                'https://www.googleapis.com/drive/v3/files?fields=id,name,createdTime',
                 headers=headers,
                 json={
-                    'name': f"chunk_{idx // chunk_size:03d}",
-                    'mimeType': 'application/vnd.google-apps.folder',
-                    'parents': [parent_node_id],
-                    'description': chunk_str,
+                    'name': filename,
+                    'mimeType': _FOLDER_MIME,
+                    'parents': [parent_id],
+                    'description': desc,
                 },
                 timeout=10,
             )
+            if resp.status_code != 200:
+                logger.warning(f"Failed to create Drive archive node: {resp.text[:200]}")
+                return None
+            node = resp.json()
+        else:
+            desc = f"CURA_ZLIB_MULTI:{mime_type}:{sha256_hash}:"
+            resp = http_requests.post(
+                'https://www.googleapis.com/drive/v3/files?fields=id,name,createdTime',
+                headers=headers,
+                json={
+                    'name': filename,
+                    'mimeType': _FOLDER_MIME,
+                    'parents': [parent_id],
+                    'description': desc,
+                },
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                return None
+            node = resp.json()
+            parent_node_id = node['id']
+            chunk_size = 24000
+            for idx in range(0, len(compressed_b64), chunk_size):
+                chunk_str = compressed_b64[idx:idx + chunk_size]
+                http_requests.post(
+                    'https://www.googleapis.com/drive/v3/files?fields=id',
+                    headers=headers,
+                    json={
+                        'name': f"chunk_{idx // chunk_size:03d}",
+                        'mimeType': _FOLDER_MIME,
+                        'parents': [parent_node_id],
+                        'description': chunk_str,
+                    },
+                    timeout=10,
+                )
+        node_mime = _FOLDER_MIME
 
     drive_id = node['id']
-    _MEDIA_CACHE[drive_id] = (raw_bytes, mime_type)
+    _cache_media(drive_id, raw_bytes, mime_type)
 
     info = {
         'id': drive_id,
@@ -363,7 +547,7 @@ def store_archive_file(
         'staff_name': staff_name,
         'created_at': node.get('createdTime') or datetime.utcnow().isoformat() + 'Z',
         'download_url': f"{BACKEND_PUBLIC_URL}/api/reports/archives/{drive_id}/download/",
-        'drive_url': f"https://drive.google.com/drive/folders/{drive_id}",
+        'drive_url': _drive_url(drive_id, node_mime),
     }
 
     try:
@@ -393,20 +577,6 @@ def _sync_consultation_worker(payload: dict):
         date_str = str(payload.get('date') or datetime.now().strftime('%Y-%m-%d'))[:10]
         ledger_name = f"Consultations_{date_str}.csv"
         live_folder_id = SUBFOLDER_IDS['live_logs']
-        headers = {
-            'Authorization': f'Bearer {creds.token}',
-            'Content-Type': 'application/json',
-        }
-
-        # 1. Check if today's ledger node already exists in Live_Daily_Logs
-        q = f"'{live_folder_id}' in parents and name = '{ledger_name}' and trashed = false"
-        search_resp = http_requests.get(
-            'https://www.googleapis.com/drive/v3/files',
-            params={'q': q, 'fields': 'files(id,name,description)', 'pageSize': 1},
-            headers={'Authorization': f'Bearer {creds.token}'},
-            timeout=8,
-        )
-        files = (search_resp.json() or {}).get('files', []) if search_resp.status_code == 200 else []
 
         csv_headers = [
             'Consultation_ID', 'Date', 'Time_In', 'Time_Out', 'Patient_ID', 'Patient_Name',
@@ -414,9 +584,6 @@ def _sync_consultation_worker(payload: dict):
             'Pulse', 'RR', 'O2_Sat', 'Doctor', 'Assisting_Nurse', 'Treatments',
             'Early_Dismissal', 'Destination', 'Nurse_Notes'
         ]
-
-        out_buf = io.StringIO()
-        writer = csv.writer(out_buf)
         row_values = [
             payload.get('id', ''),
             date_str,
@@ -442,6 +609,26 @@ def _sync_consultation_worker(payload: dict):
             payload.get('nurseNotes', ''),
         ]
 
+        if _using_user_oauth(creds):
+            _append_daily_csv_oauth(creds, live_folder_id, ledger_name, csv_headers, row_values, _CONSULT_LOCK)
+            return
+
+        headers = {
+            'Authorization': f'Bearer {creds.token}',
+            'Content-Type': 'application/json',
+        }
+        q = f"'{live_folder_id}' in parents and name = '{ledger_name}' and trashed = false"
+        search_resp = http_requests.get(
+            'https://www.googleapis.com/drive/v3/files',
+            params={'q': q, 'fields': 'files(id,name,description)', 'pageSize': 1},
+            headers={'Authorization': f'Bearer {creds.token}'},
+            timeout=8,
+        )
+        files = (search_resp.json() or {}).get('files', []) if search_resp.status_code == 200 else []
+
+        out_buf = io.StringIO()
+        writer = csv.writer(out_buf)
+
         if not files:
             writer.writerow(csv_headers)
             writer.writerow(row_values)
@@ -451,7 +638,7 @@ def _sync_consultation_worker(payload: dict):
                 headers=headers,
                 json={
                     'name': ledger_name,
-                    'mimeType': 'application/vnd.google-apps.folder',
+                    'mimeType': _FOLDER_MIME,
                     'parents': [live_folder_id],
                     'description': csv_text[:24800],
                 },
@@ -482,7 +669,7 @@ def _sync_consultation_worker(payload: dict):
             )
             _MEDIA_CACHE.pop(ledger_id, None)
 
-        # 2. Also create an individual human-readable entry inside today's ledger folder
+        # 2. Also create an individual human-readable entry inside today's ledger folder (Service Account mode only)
         if ledger_id:
             time_clean = str(payload.get('timeIn') or '0000').replace(':', '')[:4]
             pname_clean = ''.join(c if c.isalnum() or c in (' ', '-', '_') else '' for c in str(payload.get('patient_name') or 'PATIENT')).strip()[:35]
@@ -492,7 +679,7 @@ def _sync_consultation_worker(payload: dict):
                 headers=headers,
                 json={
                     'name': entry_name,
-                    'mimeType': 'application/vnd.google-apps.folder',
+                    'mimeType': _FOLDER_MIME,
                     'parents': [ledger_id],
                     'description': json.dumps(payload, indent=2)[:24800],
                 },
@@ -567,14 +754,7 @@ def _sync_audit_log_worker(payload: dict):
         date_str = str(payload.get('date') or datetime.now().strftime('%Y-%m-%d'))[:10]
         base_name = f"Audit_Trail_{date_str}"
         audit_folder_id = SUBFOLDER_IDS['audit_logs']
-        headers = {
-            'Authorization': f'Bearer {creds.token}',
-            'Content-Type': 'application/json',
-        }
-
         csv_headers = ['Timestamp', 'Staff_Name', 'Staff_Role', 'Action', 'Target_Type', 'Target_ID', 'Details']
-        out_buf = io.StringIO()
-        writer = csv.writer(out_buf)
         row_values = [
             payload.get('timestamp', ''),
             payload.get('staff_name', ''),
@@ -584,6 +764,17 @@ def _sync_audit_log_worker(payload: dict):
             payload.get('target_id', ''),
             payload.get('details', ''),
         ]
+
+        if _using_user_oauth(creds):
+            _append_daily_csv_oauth(creds, audit_folder_id, f"{base_name}.csv", csv_headers, row_values, _AUDIT_LOCK)
+            return
+
+        headers = {
+            'Authorization': f'Bearer {creds.token}',
+            'Content-Type': 'application/json',
+        }
+        out_buf = io.StringIO()
+        writer = csv.writer(out_buf)
 
         # ponytail: Drive folder description max 24.8KB per part; rolls over into _partNN.csv without truncating history
         with _AUDIT_LOCK:
@@ -609,7 +800,7 @@ def _sync_audit_log_worker(payload: dict):
                     headers=headers,
                     json={
                         'name': f"{base_name}.csv",
-                        'mimeType': 'application/vnd.google-apps.folder',
+                        'mimeType': _FOLDER_MIME,
                         'parents': [audit_folder_id],
                         'description': out_buf.getvalue()[:24800],
                     },
@@ -644,7 +835,7 @@ def _sync_audit_log_worker(payload: dict):
                     headers=headers,
                     json={
                         'name': f"{base_name}_part{latest_part + 1:02d}.csv",
-                        'mimeType': 'application/vnd.google-apps.folder',
+                        'mimeType': _FOLDER_MIME,
                         'parents': [audit_folder_id],
                         'description': roll_buf.getvalue()[:24800],
                     },
@@ -701,7 +892,7 @@ def list_drive_archives(folder_keys: tuple[str, ...] = ('live_logs', 'archives')
                 'https://www.googleapis.com/drive/v3/files',
                 params={
                     'q': q,
-                    'fields': 'files(id,name,description,createdTime,modifiedTime)',
+                    'fields': 'files(id,name,mimeType,sha256Checksum,description,createdTime,modifiedTime)',
                     'orderBy': 'modifiedTime desc',
                     'pageSize': 50,
                 },
@@ -712,13 +903,16 @@ def list_drive_archives(folder_keys: tuple[str, ...] = ('live_logs', 'archives')
                 continue
             for f in (resp.json() or {}).get('files', []):
                 desc = f.get('description') or ''
+                file_mime = f.get('mimeType') or ''
                 sha = ''
                 if desc.startswith(('CURA_ZLIB:', 'CURA_ZLIB_MULTI:')):
                     parts = desc.split(':', 3)
                     if len(parts) >= 3:
                         sha = parts[2]
-                else:
-                    sha = hashlib.sha256(desc.encode('utf-8')).hexdigest()[:16] if desc else ''
+                elif f.get('sha256Checksum'):
+                    sha = f['sha256Checksum'][:16]
+                elif desc:
+                    sha = hashlib.sha256(desc.encode('utf-8')).hexdigest()[:16]
                 fid = f['id']
                 results.append({
                     'id': fid,
@@ -728,7 +922,7 @@ def list_drive_archives(folder_keys: tuple[str, ...] = ('live_logs', 'archives')
                     'sha256': sha,
                     'created_at': f.get('modifiedTime') or f.get('createdTime') or '',
                     'download_url': f"{BACKEND_PUBLIC_URL}/api/reports/archives/{fid}/download/",
-                    'drive_url': f"https://drive.google.com/drive/folders/{fid}",
+                    'drive_url': _drive_url(fid, file_mime),
                 })
         except Exception as exc:
             logger.warning(f"Failed listing {folder_key}: {exc}")

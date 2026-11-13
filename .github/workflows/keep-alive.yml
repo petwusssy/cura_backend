@@ -11,5 +11,7 @@ jobs:
   ping-backend:
     runs-on: ubuntu-latest
     steps:
-      - name: Wake Render dvj5 and query Supabase
-        run: curl -fsS --max-time 120 --retry 1 --retry-delay 5 https://cura-backend-dvj5.onrender.com/api/staff/ >/dev/null
+      - name: Wake Render dvj5 and keep Supabase + Drive OAuth alive
+        run: |
+          curl -fsS --max-time 120 --retry 1 --retry-delay 5 https://cura-backend-dvj5.onrender.com/api/staff/ >/dev/null
+          curl -fsS --max-time 30 https://cura-backend-dvj5.onrender.com/api/audit-logs/drive-archives/ >/dev/null || true

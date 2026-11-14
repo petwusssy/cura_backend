@@ -63,6 +63,9 @@ MIDDLEWARE = [
 
 # Disable COOP to prevent popup window blocking in Google Authentication
 SECURE_CROSS_ORIGIN_OPENER_POLICY = None
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
+SECURE_REFERRER_POLICY = 'strict-origin-when-cross-origin'
 
 ROOT_URLCONF = 'config.urls'
 
@@ -172,7 +175,7 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 # CORS Configuration
 # Allow frontend to connect and include credentials (cookies)
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=False, cast=bool)
 CORS_ALLOW_CREDENTIALS = True
 
 CORS_ALLOWED_ORIGINS = [
@@ -185,9 +188,10 @@ CORS_ALLOWED_ORIGINS = [
 ]
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https:\/\/.*\.vercel\.app$",
-    r"^http:\/\/localhost:\d+$",
+    r"^https?:\/\/localhost(:\d+)?$",
     r"^http:\/\/127\.0\.0\.1:\d+$",
     r"^http:\/\/192\.168\.\d+\.\d+:\d+$",
+    r"^(capacitor|ionic):\/\/localhost$",
 ]
 
 from corsheaders.defaults import default_headers

@@ -175,4 +175,69 @@ class DriveOAuthTests(unittest.TestCase):
             self.assertEqual(ran, ['appointments'])
 
 
+class PrivacySecurityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+        import django
+        django.setup()
+
+    def test_security_and_cors_defaults(self):
+        from django.conf import settings as dj_settings
+        self.assertFalse(dj_settings.CORS_ALLOW_ALL_ORIGINS)
+        self.assertTrue(dj_settings.SECURE_CONTENT_TYPE_NOSNIFF)
+        self.assertEqual(dj_settings.X_FRAME_OPTIONS, 'DENY')
+        self.assertEqual(dj_settings.SECURE_REFERRER_POLICY, 'strict-origin-when-cross-origin')
+
+    def test_record_privacy_consent_only_when_accepted(self):
+        from api import views
+        with patch('api.models.AuditLog.objects.create') as mock_create:
+            views._record_privacy_consent({}, 'STU-1', 'JANE DOE', 'Mobile Registration')
+            mock_create.assert_not_called()
+
+            views._record_privacy_consent(
+                {'privacy_accepted': True, 'privacy_policy_version': '2026-06'},
+                'STU-1',
+                'JANE DOE',
+                'Mobile Registration',
+            )
+            mock_create.assert_called_once()
+            kwargs = mock_create.call_args.kwargs
+            self.assertEqual(kwargs['action'], 'PRIVACY_CONSENT_ACCEPTED')
+            self.assertEqual(kwargs['target_id'], 'STU-1')
+            self.assertIn('2026-06', kwargs['details'])
+
+    def test_change_password_rejects_unauthenticated_blank_current_password(self):
+        from rest_framework.test import APIRequestFactory
+        from api.views import ChangePasswordView
+
+        factory = APIRequestFactory()
+        fake_user = MagicMock(pk=7, email='student@ua.edu.ph')
+        fake_user.check_password.side_effect = lambda pw: pw == 'OldPass123'
+
+        qs = MagicMock()
+        qs.first.return_value = fake_user
+
+        with patch('api.views.User.objects.filter', return_value=qs):
+            req_blank = factory.post('/api/auth/change-password/', {
+                'email': 'student@ua.edu.ph',
+                'current_password': '',
+                'new_password': 'NewPass123',
+            }, format='json')
+            resp_blank = ChangePasswordView.as_view()(req_blank)
+            self.assertEqual(resp_blank.status_code, 400)
+            fake_user.set_password.assert_not_called()
+
+            req_ok = factory.post('/api/auth/change-password/', {
+                'email': 'student@ua.edu.ph',
+                'current_password': 'OldPass123',
+                'new_password': 'NewPass123',
+            }, format='json')
+            resp_ok = ChangePasswordView.as_view()(req_ok)
+            self.assertEqual(resp_ok.status_code, 200)
+            fake_user.set_password.assert_called_once_with('NewPass123')
+            fake_user.save.assert_called_once()
+
+
+
 

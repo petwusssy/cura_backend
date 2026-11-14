@@ -71,9 +71,13 @@ class GoogleLoginView(APIView):
                         else:
                             raise ValueError(f"Unrecognized token issuer ({iss}) or audience ({aud})")
                     except Exception as e3:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "Google OAuth verification failed: %s | %s | %s", e1, e2, e3
+                        )
                         return Response({
                             'error': 'Invalid token',
-                            'details': f"OAuth verification failed: {e1}; Fallback failed: {e2}; Firebase token failed: {e3}"
+                            'details': 'Google sign-in verification failed. Please try again.'
                         }, status=status.HTTP_401_UNAUTHORIZED)
 
             email = (idinfo.get('email') or request.data.get('email') or '').strip().lower()
@@ -509,6 +513,25 @@ class VerifyOTPView(APIView):
         except OTPVerification.DoesNotExist:
             return Response({'error': 'Invalid OTP'}, status=400)
 
+def _record_privacy_consent(request_data, patient_id, subject_name, channel='Mobile App'):
+    if not request_data.get('privacy_accepted'):
+        return
+    version = str(request_data.get('privacy_policy_version') or '2026-06')[:32]
+    try:
+        from .models import AuditLog
+        AuditLog.objects.create(
+            staff=None,
+            staff_name_snapshot=(subject_name or patient_id or 'PATIENT')[:150],
+            staff_role_snapshot='Patient',
+            action='PRIVACY_CONSENT_ACCEPTED',
+            target_type='Patient',
+            target_id=str(patient_id or '')[:120],
+            details=f'Accepted RA 10173 Data Privacy Policy (v{version}) via {channel}',
+        )
+    except Exception:
+        pass
+
+
 class RegisterView(APIView):
     permission_classes = [AllowAny]
     def post(self, request):
@@ -566,6 +589,7 @@ class RegisterView(APIView):
         refresh = RefreshToken.for_user(user)
         refresh['username'] = user.username
         refresh['roles'] = list(user.groups.values_list('name', flat=True))
+        _record_privacy_consent(request.data, patient.id, patient.name, 'Mobile Registration')
         
         return Response({
             'refresh': str(refresh),
@@ -698,6 +722,7 @@ class SetPasswordView(APIView):
 
             patient_name = patient.name if patient else email.split('@')[0]
             resolved_patient_id = patient.id if patient else user.username
+            _record_privacy_consent(request.data, resolved_patient_id, patient_name, 'Mobile Account Claim')
             return Response({
                 'refresh': str(refresh),
                 'access': str(refresh.access_token),
@@ -712,17 +737,32 @@ class ChangePasswordView(APIView):
 
     def post(self, request):
         email = request.data.get('email', '').strip()
-        current_password = request.data.get('current_password')
-        new_password = request.data.get('new_password')
+        current_password = request.data.get('current_password') or ''
+        new_password = request.data.get('new_password') or ''
 
         if not email or not new_password:
             return Response({'error': 'Email and new password are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(new_password) < 6:
+            return Response({'error': 'New password must be at least 6 characters.'}, status=status.HTTP_400_BAD_REQUEST)
 
         user = User.objects.filter(email__iexact=email).first() or User.objects.filter(username__iexact=email).first()
         if not user:
             return Response({'error': 'User account not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        if current_password and not user.check_password(current_password):
+        is_self_authenticated = bool(
+            request.user
+            and request.user.is_authenticated
+            and (
+                request.user.is_superuser
+                or request.user.pk == user.pk
+                or (request.user.email or '').strip().lower() == email.lower()
+            )
+        )
+
+        if not is_self_authenticated:
+            if not current_password or not user.check_password(current_password):
+                return Response({'error': 'Current password is incorrect or missing.'}, status=status.HTTP_400_BAD_REQUEST)
+        elif current_password and not user.check_password(current_password):
             return Response({'error': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
 
         user.set_password(new_password)

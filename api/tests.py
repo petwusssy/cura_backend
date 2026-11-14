@@ -341,6 +341,79 @@ class PrivacySecurityTests(unittest.TestCase):
         self.assertTrue(resp_5.data['is_locked'])
         self.assertEqual(resp_5.data['attempts_remaining'], 0)
 
+    def test_staff_password_change_requires_master_key_and_invalidates_old_tokens(self):
+        import os
+        from unittest.mock import patch
+        from django.contrib.auth.models import User
+        from rest_framework.exceptions import AuthenticationFailed
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from rest_framework_simplejwt.tokens import AccessToken
+        from api.auth_utils import (
+            VerifiedJWTAuthentication,
+            mint_tokens_for_user,
+            verify_refresh_token_signature,
+        )
+        from api.views import ChangePasswordView, CustomTokenRefreshView
+
+        staff_user = User.objects.create_user(
+            username='anthropeak2026',
+            email='clinic@ua.edu.ph',
+            password='OldClinicPass!123',
+            is_staff=True,
+        )
+        old_refresh, _ = mint_tokens_for_user(staff_user)
+        old_access_str = str(old_refresh.access_token)
+        old_refresh_str = str(old_refresh)
+
+        jwt_auth = VerifiedJWTAuthentication()
+        self.assertEqual(jwt_auth.get_user(AccessToken(old_access_str)).pk, staff_user.pk)
+        self.assertTrue(verify_refresh_token_signature(old_refresh_str))
+
+        factory = APIRequestFactory()
+        change_view = ChangePasswordView.as_view()
+
+        with patch.dict(os.environ, {'USER_MANAGEMENT_PASSWORD': 'MasterKey999!'}, clear=False):
+            # Missing or wrong Master Key must return 403 even if authenticated as self
+            bad_req = factory.post('/api/auth/change-password/', {
+                'email': 'anthropeak2026',
+                'current_password': 'OldClinicPass!123',
+                'new_password': 'NewClinicPass!456',
+                'admin_password': 'wrong-master-key',
+            }, format='json')
+            force_authenticate(bad_req, user=staff_user)
+            bad_resp = change_view(bad_req)
+            self.assertEqual(bad_resp.status_code, 403)
+            staff_user.refresh_from_db()
+            self.assertTrue(staff_user.check_password('OldClinicPass!123'))
+
+            # Valid current password + valid Master Key succeeds and mints fresh tokens
+            ok_req = factory.post('/api/auth/change-password/', {
+                'email': 'anthropeak2026',
+                'current_password': 'OldClinicPass!123',
+                'new_password': 'NewClinicPass!456',
+                'admin_password': 'MasterKey999!',
+            }, format='json')
+            force_authenticate(ok_req, user=staff_user)
+            ok_resp = change_view(ok_req)
+            self.assertEqual(ok_resp.status_code, 200)
+            self.assertIn('access', ok_resp.data)
+
+        staff_user.refresh_from_db()
+        self.assertTrue(staff_user.check_password('NewClinicPass!456'))
+
+        # Old access and refresh tokens (on other clinic PCs) are immediately rejected
+        with self.assertRaises(AuthenticationFailed):
+            jwt_auth.get_user(AccessToken(old_access_str))
+        self.assertFalse(verify_refresh_token_signature(old_refresh_str))
+
+        refresh_req = factory.post('/api/auth/refresh/', {'refresh': old_refresh_str}, format='json')
+        refresh_resp = CustomTokenRefreshView.as_view()(refresh_req)
+        self.assertEqual(refresh_resp.status_code, 401)
+
+        # Head Nurse's rotated access token remains valid
+        new_user = jwt_auth.get_user(AccessToken(ok_resp.data['access']))
+        self.assertEqual(new_user.pk, staff_user.pk)
+
 
 
 

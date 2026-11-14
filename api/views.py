@@ -5,7 +5,17 @@ from django.http import JsonResponse
 from django.contrib.auth.models import User
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework_simplejwt.tokens import RefreshToken
+from .auth_utils import (
+    USER_MGMT_SENTINEL,
+    get_env_mgmt_passwords,
+    is_main_cura_login_password,
+    is_staff_account,
+    is_valid_mgmt_password,
+    mint_tokens_for_user,
+    populate_token_claims,
+    set_refresh_cookie,
+    verify_refresh_token_signature,
+)
 from django.conf import settings
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -227,12 +237,7 @@ class GoogleLoginView(APIView):
                     patient.save()
 
             # Generate JWT tokens for the user
-            refresh = RefreshToken.for_user(user)
-            refresh['username'] = user.username
-            roles = list(user.groups.values_list('name', flat=True))
-            if user.is_superuser:
-                roles.append('Admin')
-            refresh['roles'] = roles
+            refresh, roles = mint_tokens_for_user(user)
 
             return Response({
                 'refresh': str(refresh),
@@ -562,11 +567,7 @@ class VerifyOTPView(APIView):
             if user:
                 # Single-use OTP: consume immediately when minting login tokens
                 verification.delete()
-                refresh = RefreshToken.for_user(user)
-                refresh['username'] = user.username
-                refresh['roles'] = list(user.groups.values_list('name', flat=True))
-                if user.is_superuser:
-                    refresh['roles'].append('Admin')
+                refresh, _ = mint_tokens_for_user(user)
                 res_payload.update({
                     'refresh': str(refresh),
                     'access': str(refresh.access_token),
@@ -777,6 +778,11 @@ class SetPasswordView(APIView):
                 return Response({'error': 'Session expired'}, status=400)
             
             user = User.objects.filter(email__iexact=email).first() or User.objects.filter(username__iexact=email).first()
+            if user and is_staff_account(user):
+                return Response(
+                    {'error': 'Clinic staff accounts must change passwords via Clinic Settings.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
             if not user:
                 user = User.objects.create_user(username=email, email=email)
             user.set_password(password)
@@ -784,11 +790,7 @@ class SetPasswordView(APIView):
             
             verification.delete() # Cleanup
             
-            refresh = RefreshToken.for_user(user)
-            refresh['username'] = user.username
-            refresh['roles'] = list(user.groups.values_list('name', flat=True))
-            if user.is_superuser:
-                refresh['roles'].append('Admin')
+            refresh, _ = mint_tokens_for_user(user)
 
             patient = Patient.objects.filter(email__iexact=email).first()
             if not patient and patient_id:
@@ -831,25 +833,45 @@ class ChangePasswordView(APIView):
         if not user:
             return Response({'error': 'User account not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        is_self_authenticated = bool(
-            request.user
-            and request.user.is_authenticated
-            and (
-                request.user.is_superuser
-                or request.user.pk == user.pk
-                or (request.user.email or '').strip().lower() == email.lower()
-            )
-        )
-
-        if not is_self_authenticated:
+        staff_account = is_staff_account(user)
+        if staff_account:
+            admin_password = (request.data.get('admin_password') or '').strip()
             if not current_password or not user.check_password(current_password):
                 return Response({'error': 'Current password is incorrect or missing.'}, status=status.HTTP_400_BAD_REQUEST)
-        elif current_password and not user.check_password(current_password):
-            return Response({'error': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
+            if not is_valid_mgmt_password(admin_password):
+                return Response(
+                    {'error': 'Valid User Management Master Key is required to change the CURA login password.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        else:
+            is_self_authenticated = bool(
+                request.user
+                and request.user.is_authenticated
+                and (
+                    request.user.is_superuser
+                    or request.user.pk == user.pk
+                    or (request.user.email or '').strip().lower() == email.lower()
+                )
+            )
+
+            if not is_self_authenticated:
+                if not current_password or not user.check_password(current_password):
+                    return Response({'error': 'Current password is incorrect or missing.'}, status=status.HTTP_400_BAD_REQUEST)
+            elif current_password and not user.check_password(current_password):
+                return Response({'error': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
 
         user.set_password(new_password)
         user.save()
-        return Response({'success': True, 'message': 'Password updated successfully.'}, status=status.HTTP_200_OK)
+
+        payload = {'success': True, 'message': 'Password updated successfully.'}
+        if not staff_account:
+            return Response(payload, status=status.HTTP_200_OK)
+
+        refresh, _ = mint_tokens_for_user(user)
+        payload['access'] = str(refresh.access_token)
+        response = Response(payload, status=status.HTTP_200_OK)
+        set_refresh_cookie(response, str(refresh))
+        return response
 
 class DeleteAccountView(APIView):
     permission_classes = [IsAuthenticated]
@@ -895,13 +917,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
-        # Add custom claims
-        token['username'] = user.username
-        # For simplicity, assuming user has groups for role-based access
-        roles = list(user.groups.values_list('name', flat=True))
-        if user.is_superuser:
-            roles.append('Admin')
-        token['roles'] = roles
+        populate_token_claims(token, user)
         return token
 
     def validate(self, attrs):
@@ -1078,18 +1094,10 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)
         if response.status_code == 200:
-            access_token = response.data.get('access')
             refresh_token = response.data.get('refresh')
 
             if refresh_token:
-                response.set_cookie(
-                    key=settings.SIMPLE_JWT['AUTH_COOKIE'],
-                    value=refresh_token,
-                    expires=settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'],
-                    secure=settings.SIMPLE_JWT['AUTH_COOKIE_SECURE'],
-                    httponly=settings.SIMPLE_JWT['AUTH_COOKIE_HTTP_ONLY'],
-                    samesite=settings.SIMPLE_JWT['AUTH_COOKIE_SAMESITE']
-                )
+                set_refresh_cookie(response, refresh_token)
                 # Do not return the refresh token in the JSON response
                 del response.data['refresh']
 
@@ -1100,6 +1108,14 @@ class CustomTokenRefreshView(TokenRefreshView):
         cookie_refresh = request.COOKIES.get(settings.SIMPLE_JWT['AUTH_COOKIE'])
         body_refresh = request.data.get('refresh') if hasattr(request.data, 'get') else None
         refresh_token = cookie_refresh or body_refresh
+
+        if refresh_token and not verify_refresh_token_signature(refresh_token):
+            response = Response(
+                {'detail': 'Session expired due to password change. Please log in again.', 'code': 'token_not_valid'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+            response.delete_cookie(settings.SIMPLE_JWT['AUTH_COOKIE'])
+            return response
 
         if refresh_token and not body_refresh:
             if hasattr(request.data, '_mutable'):
@@ -1113,14 +1129,7 @@ class CustomTokenRefreshView(TokenRefreshView):
         if response.status_code == 200:
             new_refresh = response.data.get('refresh') or refresh_token
             if new_refresh:
-                response.set_cookie(
-                    key=settings.SIMPLE_JWT['AUTH_COOKIE'],
-                    value=new_refresh,
-                    expires=settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'],
-                    secure=settings.SIMPLE_JWT['AUTH_COOKIE_SECURE'],
-                    httponly=settings.SIMPLE_JWT['AUTH_COOKIE_HTTP_ONLY'],
-                    samesite=settings.SIMPLE_JWT['AUTH_COOKIE_SAMESITE']
-                )
+                set_refresh_cookie(response, new_refresh)
                 if cookie_refresh and not body_refresh and 'refresh' in response.data:
                     del response.data['refresh']
                 elif body_refresh and 'refresh' not in response.data:
@@ -1881,84 +1890,6 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
     authentication_classes = []
     permission_classes = [AllowAny]
 
-    USER_MGMT_SENTINEL = '__cura_user_mgmt__'
-    DEFAULT_MGMT_PASSWORD = 'uaclinic-admin'
-
-    def _get_env_mgmt_passwords(self):
-        candidates = [
-            v.strip()
-            for k, v in os.environ.items()
-            if (
-                k.strip().upper() in ('USER_MANAGEMENT_PASSWORD', 'ADMIN_SETTINGS_PASSWORD', 'USER_MGMT_PASSWORD')
-                or 'USER_MANAGEMENT' in k.strip().upper()
-                or 'MANAGEMENT_PASSWORD' in k.strip().upper()
-            )
-            and v and v.strip()
-        ]
-        for key in ('USER_MANAGEMENT_PASSWORD', 'ADMIN_SETTINGS_PASSWORD'):
-            val = (config(key, default='') or '').strip()
-            if val and val not in candidates:
-                candidates.append(val)
-        return candidates
-
-    def _is_main_cura_login_password(self, password: str) -> bool:
-        django_pw = (os.environ.get('DJANGO_PASSWORD') or '').strip()
-        if django_pw and password == django_pw:
-            return True
-        main_admin = User.objects.filter(username__iexact='anthropeak2026').first()
-        if main_admin and main_admin.check_password(password):
-            return True
-        return False
-
-    def _is_valid_mgmt_password(self, password: str) -> bool:
-        if not password:
-            return False
-        clean_pw = password.strip()
-        env_candidates = self._get_env_mgmt_passwords()
-
-        # 1. Always allow Render ENV USER_MANAGEMENT_PASSWORD (permanent Master / Recovery Key)
-        for env_pw in env_candidates:
-            if clean_pw == env_pw:
-                return True
-
-        # Never allow the main CURA login password (e.g. ANTHROPEAK2026) as User Management password
-        if self._is_main_cura_login_password(clean_pw):
-            return False
-
-        # 2. Allow custom password saved via Settings UI (stored on inactive sentinel User)
-        sentinel = User.objects.filter(username=self.USER_MGMT_SENTINEL).first()
-        if sentinel and sentinel.has_usable_password():
-            if sentinel.check_password(clean_pw):
-                return True
-
-        # 3. Optional secondary admin-verify endpoint (when configured via LEGACY_VERIFY_ADMIN_URL)
-        remote_verify_url = os.environ.get('LEGACY_VERIFY_ADMIN_URL', '').strip()
-        if not env_candidates and remote_verify_url:
-            try:
-                import urllib.request as _ureq
-                import json as _json
-                req = _ureq.Request(
-                    remote_verify_url,
-                    data=_json.dumps({'password': clean_pw}).encode('utf-8'),
-                    headers={'Content-Type': 'application/json'},
-                    method='POST',
-                )
-                with _ureq.urlopen(req, timeout=5) as resp:
-                    body = _json.loads(resp.read().decode('utf-8'))
-                    if body.get('valid'):
-                        return True
-                    if body.get('env_configured'):
-                        return False
-            except Exception:
-                pass
-
-        # 4. Allow default fallback ONLY if neither ENV var nor custom password is set
-        if not env_candidates and not (sentinel and sentinel.has_usable_password()):
-            if clean_pw == self.DEFAULT_MGMT_PASSWORD:
-                return True
-
-        return False
-
     @action(detail=False, methods=['post'], url_path='verify-admin')
     def verify_admin(self, request):
         from datetime import timedelta
@@ -1970,7 +1901,7 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
         LOCKOUT_MINUTES = 1
         now = timezone.now()
         ip = (request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip() or request.META.get('REMOTE_ADDR') or 'global')
-        attempt, _ = LoginAttempt.objects.get_or_create(identifier=f"{self.USER_MGMT_SENTINEL}:{ip}"[:255])
+        attempt, _ = LoginAttempt.objects.get_or_create(identifier=f"{USER_MGMT_SENTINEL}:{ip}"[:255])
 
         if attempt.is_locked():
             return Response(
@@ -1992,8 +1923,8 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
             attempt.locked_until = None
             attempt.save()
 
-        env_configured = bool(self._get_env_mgmt_passwords())
-        if self._is_valid_mgmt_password(password):
+        env_configured = bool(get_env_mgmt_passwords())
+        if is_valid_mgmt_password(password):
             if attempt.failed_attempts > 0 or attempt.locked_until:
                 attempt.failed_attempts = 0
                 attempt.locked_until = None
@@ -2045,19 +1976,19 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
                 {'error': 'New User Management password must be at least 6 characters.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if self._is_main_cura_login_password(new_password):
+        if is_main_cura_login_password(new_password):
             return Response(
                 {'error': 'User Management password must be separate from the main CURA login password.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if not current_password or not self._is_valid_mgmt_password(current_password):
+        if not current_password or not is_valid_mgmt_password(current_password):
             return Response(
                 {'error': 'Current or recovery password is incorrect.'},
                 status=status.HTTP_401_UNAUTHORIZED
             )
 
         sentinel, _ = User.objects.get_or_create(
-            username=self.USER_MGMT_SENTINEL,
+            username=USER_MGMT_SENTINEL,
             defaults={'is_active': False, 'is_staff': False, 'is_superuser': False}
         )
         sentinel.is_active = False

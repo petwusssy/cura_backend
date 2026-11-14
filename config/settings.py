@@ -217,7 +217,7 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'api.auth_utils.VerifiedJWTAuthentication',
     ),
     'DEFAULT_THROTTLE_RATES': {
         'anon': '120/min',

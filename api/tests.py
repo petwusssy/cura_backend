@@ -276,6 +276,51 @@ class PrivacySecurityTests(unittest.TestCase):
         vs_detail.action = 'retrieve'
         self.assertFalse(vs_detail.get_queryset().query.is_sliced)
 
+    def test_notification_delete_and_web_clear_all_preserve_patient_rows(self):
+        from rest_framework.test import APIRequestFactory
+        from api.models import AppNotification
+        from api.views import AppNotificationViewSet
+
+        web_notif = AppNotification.objects.create(
+            type='appointment_request',
+            message='New appointment request from Juan',
+            patientName='JUAN',
+        )
+        patient_turn = AppNotification.objects.create(
+            type='general',
+            message="It's your turn! Please proceed to the clinic counter.",
+            patientName='JUAN',
+            patient_id='STU-100',
+        )
+        patient_update = AppNotification.objects.create(
+            type='appointment_update',
+            message='Your appointment has been approved.',
+            patientName='JUAN',
+            patient_id='STU-100',
+        )
+
+        factory = APIRequestFactory()
+        # Individual DELETE removes row permanently
+        del_req = factory.delete(f'/api/notifications/{web_notif.id}/')
+        del_view = AppNotificationViewSet.as_view({'delete': 'destroy'})
+        del_resp = del_view(del_req, pk=str(web_notif.id))
+        self.assertEqual(del_resp.status_code, 204)
+        self.assertFalse(AppNotification.objects.filter(pk=web_notif.id).exists())
+
+        # Create another web notification, clear_all?audience=web should delete web only
+        web_notif_2 = AppNotification.objects.create(
+            type='medcert_request',
+            message='New medcert request',
+            patientName='JUAN',
+        )
+        clear_req = factory.post('/api/notifications/clear_all/?audience=web')
+        clear_view = AppNotificationViewSet.as_view({'post': 'clear_all'})
+        clear_resp = clear_view(clear_req)
+        self.assertEqual(clear_resp.status_code, 200)
+        self.assertFalse(AppNotification.objects.filter(pk=web_notif_2.id).exists())
+        self.assertTrue(AppNotification.objects.filter(pk=patient_turn.id).exists())
+        self.assertTrue(AppNotification.objects.filter(pk=patient_update.id).exists())
+
 
 
 

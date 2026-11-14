@@ -67,6 +67,9 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
 SECURE_REFERRER_POLICY = 'strict-origin-when-cross-origin'
 
+FRONTEND_PUBLIC_URL = config('FRONTEND_PUBLIC_URL', default='https://cura-bice.vercel.app').rstrip('/')
+BACKEND_PUBLIC_URL = config('BACKEND_PUBLIC_URL', default='https://cura-backend-dvj5.onrender.com').rstrip('/')
+
 ROOT_URLCONF = 'config.urls'
 
 TEMPLATES = [
@@ -192,6 +195,15 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^http:\/\/127\.0\.0\.1:\d+$",
     r"^http:\/\/192\.168\.\d+\.\d+:\d+$",
     r"^(capacitor|ionic):\/\/localhost$",
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in config(
+        'CSRF_TRUSTED_ORIGINS',
+        default='https://cura-bice.vercel.app,https://curamobile.vercel.app,https://cura-backend-dvj5.onrender.com',
+    ).split(',')
+    if origin.strip()
 ]
 
 from corsheaders.defaults import default_headers

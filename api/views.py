@@ -1325,7 +1325,7 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
             
             clean_room_id = str(telemed_request.id).replace('-', '')[:8]
             if not meeting_link or not str(meeting_link).startswith('http') or 'meet.jit.si' in str(meeting_link):
-                meeting_link = f"https://cura-bice.vercel.app/call/CURA-Telemed-{clean_room_id}"
+                meeting_link = f"{settings.FRONTEND_PUBLIC_URL}/call/CURA-Telemed-{clean_room_id}"
             
             telemed_request.meeting_link = meeting_link
             if secondary_link is not None:
@@ -1759,13 +1759,14 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
             if sentinel.check_password(clean_pw):
                 return True
 
-        # 3. If this Render instance does not have USER_MANAGEMENT_PASSWORD set locally, verify against cura-backend-dvj5 ENV
-        if not env_candidates and 'cura-backend-dvj5' not in os.environ.get('RENDER_EXTERNAL_URL', ''):
+        # 3. Optional secondary admin-verify endpoint (when configured via LEGACY_VERIFY_ADMIN_URL)
+        remote_verify_url = os.environ.get('LEGACY_VERIFY_ADMIN_URL', '').strip()
+        if not env_candidates and remote_verify_url:
             try:
                 import urllib.request as _ureq
                 import json as _json
                 req = _ureq.Request(
-                    'https://cura-backend-dvj5.onrender.com/api/staff/verify-admin/',
+                    remote_verify_url,
                     data=_json.dumps({'password': clean_pw}).encode('utf-8'),
                     headers={'Content-Type': 'application/json'},
                     method='POST',

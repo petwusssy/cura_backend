@@ -188,6 +188,9 @@ class PrivacySecurityTests(unittest.TestCase):
         self.assertTrue(dj_settings.SECURE_CONTENT_TYPE_NOSNIFF)
         self.assertEqual(dj_settings.X_FRAME_OPTIONS, 'DENY')
         self.assertEqual(dj_settings.SECURE_REFERRER_POLICY, 'strict-origin-when-cross-origin')
+        self.assertTrue(dj_settings.FRONTEND_PUBLIC_URL.startswith('https://'))
+        self.assertTrue(dj_settings.BACKEND_PUBLIC_URL.startswith('https://'))
+        self.assertGreaterEqual(len(dj_settings.CSRF_TRUSTED_ORIGINS), 1)
 
     def test_record_privacy_consent_only_when_accepted(self):
         from api import views

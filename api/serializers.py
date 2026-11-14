@@ -48,6 +48,10 @@ class ConsultationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Consultation
         fields = '__all__'
+        extra_kwargs = {
+            'date': {'required': False},
+            'timeIn': {'required': False},
+        }
 
     def create(self, validated_data):
         from django.utils import timezone
@@ -64,7 +68,6 @@ class ConsultationSerializer(serializers.ModelSerializer):
         return consultation
 
     def update(self, instance, validated_data):
-        validated_data.pop('assistingNurse', None)
         treatments_data = validated_data.pop('treatments', None)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
@@ -128,25 +131,30 @@ class MedicineItemSerializer(serializers.ModelSerializer):
         return medicine
 
     def update(self, instance, validated_data):
-        stock_history_data = validated_data.pop('stockHistory', None)
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-        
-        if stock_history_data is not None:
-            instance.stockHistory.all().delete()
-            for stock_data in stock_history_data:
-                stock_data.pop('medicine', None)
-                stock_data.pop('id', None)
-                StockHistory.objects.create(medicine=instance, **stock_data)
+        from django.db import transaction
+        with transaction.atomic():
+            locked = MedicineItem.objects.select_for_update().get(pk=instance.pk)
+            stock_history_data = validated_data.pop('stockHistory', None)
+            for attr, value in validated_data.items():
+                setattr(locked, attr, value)
+            if locked.stock < 0:
+                locked.stock = 0
+            locked.save()
 
-        history_dispensed = sum(
-            h.qty for h in instance.stockHistory.filter(type='dispense')
-        )
-        if instance.dispensed < history_dispensed:
-            instance.dispensed = history_dispensed
-            instance.save(update_fields=['dispensed'])
-        return instance
+            if stock_history_data is not None:
+                locked.stockHistory.all().delete()
+                for stock_data in stock_history_data:
+                    stock_data.pop('medicine', None)
+                    stock_data.pop('id', None)
+                    StockHistory.objects.create(medicine=locked, **stock_data)
+
+            history_dispensed = sum(
+                h.qty for h in locked.stockHistory.filter(type='dispense')
+            )
+            if locked.dispensed < history_dispensed:
+                locked.dispensed = history_dispensed
+                locked.save(update_fields=['dispensed'])
+            return locked
 
 class PurchaseHistorySerializer(serializers.ModelSerializer):
     class Meta:

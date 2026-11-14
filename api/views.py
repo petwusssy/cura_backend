@@ -30,8 +30,46 @@ from .serializers import (
 )
 
 import random
+import secrets
 from django.utils import timezone
+from django.db import transaction
 from datetime import timedelta
+
+_GOOGLE_AUTH_REQ = requests.Request()
+
+
+def _rekey_patient_safely(patient: Patient, new_id: str) -> Patient:
+    """Safely changes a Patient's primary key without cascade-deleting related clinical history."""
+    clean_new_id = str(new_id or '').strip()
+    if not clean_new_id or clean_new_id == patient.id:
+        return patient
+    old_id = patient.id
+    with transaction.atomic():
+        existing_target = Patient.objects.select_for_update().filter(id=clean_new_id).first()
+        if existing_target and existing_target.id != old_id:
+            target_id = existing_target.id
+        else:
+            patient.pk = clean_new_id
+            patient.id = clean_new_id
+            patient.save()
+            target_id = clean_new_id
+
+        from .models import (
+            TelemedicineRequest, AppointmentRequest, PatientQueue, MedicalCertificateRequest
+        )
+        Consultation.objects.filter(patient_id=old_id).update(patient_id=target_id)
+        MedicalCertificate.objects.filter(patient_id=old_id).update(patient_id=target_id)
+        HospitalTransfer.objects.filter(patient_id=old_id).update(patient_id=target_id)
+        TelemedicineRequest.objects.filter(patient_id=old_id).update(patient_id=target_id)
+        AppointmentRequest.objects.filter(patient_id=old_id).update(patient_id=target_id)
+        PatientQueue.objects.filter(patient_id=old_id).update(patient_id=target_id)
+        MedicalCertificateRequest.objects.filter(patient_id=old_id).update(patient_id=target_id)
+        AppNotification.objects.filter(patient_id=str(old_id)).update(patient_id=str(target_id))
+        Bed.objects.filter(patientId=str(old_id)).update(patientId=str(target_id))
+        BedHistory.objects.filter(patientId=str(old_id)).update(patientId=str(target_id))
+        Patient.objects.filter(id=old_id).delete()
+        return Patient.objects.get(id=target_id)
+
 
 class GoogleLoginView(APIView):
     permission_classes = [AllowAny]
@@ -47,7 +85,7 @@ class GoogleLoginView(APIView):
             FIREBASE_PROJECT_ID = "cura-clinic-65b94"
             
             idinfo = None
-            req = requests.Request()
+            req = _GOOGLE_AUTH_REQ
 
             # 1. Try verifying as Google OAuth2 ID token
             try:
@@ -57,30 +95,23 @@ class GoogleLoginView(APIView):
                 try:
                     idinfo = id_token.verify_oauth2_token(token, req)
                 except Exception as e2:
-                    # 3. Fallback: Parse and validate Firebase Auth ID token
+                    # 3. Verify as cryptographic Firebase Auth ID token
                     try:
-                        import jwt
-                        decoded = jwt.decode(token, options={"verify_signature": False})
-                        iss = decoded.get('iss', '')
-                        aud = decoded.get('aud', '')
-                        exp = decoded.get('exp', 0)
-                        if (iss == f"https://securetoken.google.com/{FIREBASE_PROJECT_ID}" or iss == "https://accounts.google.com" or "securetoken.google.com" in iss) and (aud == FIREBASE_PROJECT_ID or aud == CLIENT_ID):
-                            if exp and timezone.now().timestamp() > exp:
-                                return Response({'error': 'Token has expired. Please sign in again.'}, status=status.HTTP_401_UNAUTHORIZED)
-                            idinfo = decoded
-                        else:
-                            raise ValueError(f"Unrecognized token issuer ({iss}) or audience ({aud})")
+                        idinfo = id_token.verify_firebase_token(token, req, audience=FIREBASE_PROJECT_ID)
                     except Exception as e3:
-                        import logging
-                        logging.getLogger(__name__).warning(
-                            "Google OAuth verification failed: %s | %s | %s", e1, e2, e3
-                        )
-                        return Response({
-                            'error': 'Invalid token',
-                            'details': 'Google sign-in verification failed. Please try again.'
-                        }, status=status.HTTP_401_UNAUTHORIZED)
+                        try:
+                            idinfo = id_token.verify_firebase_token(token, req)
+                        except Exception as e4:
+                            import logging
+                            logging.getLogger(__name__).warning(
+                                "Google OAuth verification failed: %s | %s | %s | %s", e1, e2, e3, e4
+                            )
+                            return Response({
+                                'error': 'Invalid token',
+                                'details': 'Google sign-in verification failed. Please try again.'
+                            }, status=status.HTTP_401_UNAUTHORIZED)
 
-            email = (idinfo.get('email') or request.data.get('email') or '').strip().lower()
+            email = (idinfo.get('email') or '').strip().lower()
             if not email:
                 return Response({'error': 'Email not found in authentication token'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -116,6 +147,14 @@ class GoogleLoginView(APIView):
                         'category': category,
                     }, status=status.HTTP_400_BAD_REQUEST)
                 else:
+                    with transaction.atomic():
+                        OTPVerification.objects.filter(email__iexact=email).delete()
+                        OTPVerification.objects.create(
+                            email=email,
+                            otp=str(secrets.randbelow(900000) + 100000),
+                            expires_at=timezone.now() + timedelta(minutes=30),
+                            is_verified=True,
+                        )
                     patient_data = None
                     if patient:
                         patient_data = {
@@ -142,17 +181,25 @@ class GoogleLoginView(APIView):
 
             # Case A: User is attempting to Sign In
             if not user:
-                # If there is no registered user account, DO NOT auto-create and DO NOT log in.
-                return Response({
-                    'error': 'No account found for this Google account. Please create an account first.',
-                    'code': 'ACCOUNT_NOT_FOUND',
-                    'not_found': True,
-                    'email': email,
-                    'name': full_name,
-                    'first_name': first_name,
-                    'last_name': last_name,
-                    'category': category,
-                }, status=status.HTTP_404_NOT_FOUND)
+                # If patient record already exists in clinic with this Google email, auto-claim & sign in seamlessly
+                if patient:
+                    user = User.objects.create_user(
+                        username=email,
+                        email=email,
+                        first_name=first_name or patient.name,
+                        last_name=last_name,
+                    )
+                else:
+                    return Response({
+                        'error': 'No account found for this Google account. Please create an account first.',
+                        'code': 'ACCOUNT_NOT_FOUND',
+                        'not_found': True,
+                        'email': email,
+                        'name': full_name,
+                        'first_name': first_name,
+                        'last_name': last_name,
+                        'category': category,
+                    }, status=status.HTTP_404_NOT_FOUND)
 
             # If registered user exists (for sign in flow):
             if not user.email:
@@ -209,16 +256,23 @@ class GoogleLoginView(APIView):
 
 class CheckEmailView(APIView):
     permission_classes = [AllowAny]
+
+    def get(self, request):
+        return self.post(request)
+
     def post(self, request):
-        email = request.data.get('email', '').strip().lower()
+        params = request.data if request.data else request.query_params
+        email = (params.get('email') or request.query_params.get('email') or '').strip().lower()
         patient_id = (
-            request.data.get('patient_id') or 
-            request.data.get('student_id') or 
-            request.data.get('employee_id') or 
-            request.data.get('outsider_id') or 
-            request.data.get('id') or ''
+            params.get('patient_id') or 
+            params.get('student_id') or 
+            params.get('employee_id') or 
+            params.get('outsider_id') or 
+            params.get('id') or
+            request.query_params.get('patient_id') or
+            request.query_params.get('id') or ''
         ).strip()
-        patient_name = request.data.get('name', '').strip()
+        patient_name = (params.get('name') or request.query_params.get('name') or '').strip()
 
         if not email and not patient_id:
             return Response({'error': 'Email or ID is required'}, status=400)
@@ -351,15 +405,15 @@ class RequestOTPView(APIView):
         if not allow_new and not patient_exists and not user_exists:
             return Response({'error': 'Patient record not found.'}, status=404)
         
-        otp = str(random.randint(100000, 999999))
-        OTPVerification.objects.update_or_create(
-            email=email,
-            defaults={
-                'otp': otp,
-                'expires_at': timezone.now() + timedelta(minutes=10),
-                'is_verified': False
-            }
-        )
+        otp = str(secrets.randbelow(900000) + 100000)
+        with transaction.atomic():
+            OTPVerification.objects.filter(email__iexact=email).delete()
+            OTPVerification.objects.create(
+                email=email,
+                otp=otp,
+                expires_at=timezone.now() + timedelta(minutes=10),
+                is_verified=False
+            )
         
         from django.core.mail import send_mail
         subject = f"CURA Clinic - Verification Code: {otp}"
@@ -398,9 +452,9 @@ class RequestOTPView(APIView):
         brevo_key = getattr(settings, 'BREVO_API_KEY', '')
         if brevo_key:
             try:
-                import requests
+                import requests as http_requests
                 sender_email = getattr(settings, 'BREVO_SENDER_EMAIL', 'curaclinic.ua@gmail.com')
-                r = requests.post(
+                r = http_requests.post(
                     'https://api.brevo.com/v3/smtp/email',
                     headers={'api-key': brevo_key, 'Content-Type': 'application/json'},
                     json={
@@ -420,8 +474,8 @@ class RequestOTPView(APIView):
         resend_key = getattr(settings, 'RESEND_API_KEY', '')
         if not email_sent and resend_key:
             try:
-                import requests
-                r = requests.post(
+                import requests as http_requests
+                r = http_requests.post(
                     'https://api.resend.com/emails',
                     headers={'Authorization': f'Bearer {resend_key}', 'Content-Type': 'application/json'},
                     json={
@@ -453,7 +507,6 @@ class RequestOTPView(APIView):
                 import logging
                 logging.getLogger(__name__).warning(f"SMTP send failed (Render port block): {mail_err}")
 
-        print(f"\n=== CURA OTP VERIFICATION CODE FOR {email}: {otp} ===\n")
         return Response({'message': 'OTP sent successfully', 'email': email}, status=status.HTTP_200_OK)
 
 class VerifyOTPView(APIView):
@@ -468,20 +521,34 @@ class VerifyOTPView(APIView):
             request.data.get('outsider_id') or 
             request.data.get('id') or ''
         ).strip()
+
+        if not email or not otp:
+            return Response({'error': 'Email and OTP are required'}, status=400)
+
+        otp_attempt_key = f"otp:{email}"
+        attempt, _ = LoginAttempt.objects.get_or_create(identifier=otp_attempt_key)
+        if attempt.is_locked():
+            return Response({
+                'error': f'Too many failed attempts. Please wait {max(1, attempt.remaining_seconds())}s before trying again.'
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
         
         try:
-            verification = OTPVerification.objects.filter(email__iexact=email, otp=otp).latest('id')
+            verification = OTPVerification.objects.filter(email__iexact=email, otp=otp, is_verified=False).latest('id')
             if timezone.now() > verification.expires_at:
                 return Response({'error': 'OTP expired'}, status=400)
             
-            verification.is_verified = True
-            verification.save()
+            if attempt.failed_attempts > 0 or attempt.locked_until:
+                attempt.failed_attempts = 0
+                attempt.locked_until = None
+                attempt.save()
 
             # Check if user already exists
             user = User.objects.filter(username__iexact=email).first() or User.objects.filter(email__iexact=email).first()
             patient = Patient.objects.filter(email__iexact=email).first()
             if not patient and patient_id:
-                patient = Patient.objects.filter(id__iexact=patient_id).first()
+                candidate = Patient.objects.filter(id__iexact=patient_id).first()
+                if candidate and (not candidate.email or candidate.email.strip().lower() == email):
+                    patient = candidate
 
             patient_name = patient.name if patient else (user.first_name if user else email.split('@')[0])
             resolved_patient_id = patient.id if patient else (user.username if user else patient_id)
@@ -493,6 +560,8 @@ class VerifyOTPView(APIView):
             }
 
             if user:
+                # Single-use OTP: consume immediately when minting login tokens
+                verification.delete()
                 refresh = RefreshToken.for_user(user)
                 refresh['username'] = user.username
                 refresh['roles'] = list(user.groups.values_list('name', flat=True))
@@ -508,9 +577,16 @@ class VerifyOTPView(APIView):
                         'is_new': False,
                     }
                 })
+            else:
+                verification.is_verified = True
+                verification.save()
 
             return Response(res_payload)
         except OTPVerification.DoesNotExist:
+            attempt.failed_attempts += 1
+            if attempt.failed_attempts >= 5:
+                attempt.locked_until = timezone.now() + timedelta(minutes=5)
+            attempt.save()
             return Response({'error': 'Invalid OTP'}, status=400)
 
 def _record_privacy_consent(request_data, patient_id, subject_name, channel='Mobile App'):
@@ -562,7 +638,11 @@ class RegisterView(APIView):
         
         patient = Patient.objects.filter(email__iexact=clean_email).first()
         if not patient and id_number:
-            patient = Patient.objects.filter(id__iexact=str(id_number).strip()).first()
+            candidate = Patient.objects.filter(id__iexact=str(id_number).strip()).first()
+            if candidate:
+                if candidate.email and candidate.email.strip().lower() != clean_email:
+                    return Response({'error': 'This ID belongs to another registered account.'}, status=403)
+                patient = candidate
 
         if not patient:
             patient = Patient.objects.create(
@@ -581,9 +661,9 @@ class RegisterView(APIView):
                 patient.name = name_prefix
             if category:
                 patient.category = category
-            if id_number and patient.id != id_number and not Patient.objects.filter(id=id_number).exists():
-                patient.id = id_number
             patient.save()
+            if id_number and patient.id != id_number and not Patient.objects.filter(id=id_number).exists():
+                patient = _rekey_patient_safely(patient, id_number)
         
         # Return JWT token
         refresh = RefreshToken.for_user(user)
@@ -594,7 +674,7 @@ class RegisterView(APIView):
         return Response({
             'refresh': str(refresh),
             'access': str(refresh.access_token),
-            'user': {'email': user.email, 'name': name_prefix, 'is_new': True}
+            'user': {'id': patient.id, 'email': user.email, 'name': patient.name or name_prefix, 'is_new': True}
         }, status=status.HTTP_201_CREATED)
 
 from rest_framework.permissions import IsAuthenticated
@@ -605,18 +685,22 @@ class CompleteProfileView(APIView):
     def post(self, request):
         user = request.user
         data = request.data
+        user_email = (user.email or user.username or '').strip().lower()
         
         try:
-            patient = Patient.objects.filter(email__iexact=user.email.strip()).first()
+            patient = Patient.objects.filter(email__iexact=user_email).first()
             if not patient and user.username:
                 patient = Patient.objects.filter(email__iexact=user.username.strip()).first()
             
             patient_id = data.get('id') or data.get('student_id') or data.get('employee_id')
             if not patient and patient_id:
-                patient = Patient.objects.filter(id__iexact=str(patient_id).strip()).first()
-                if patient:
-                    patient.email = user.email or user.username
-                    patient.save()
+                candidate = Patient.objects.filter(id__iexact=str(patient_id).strip()).first()
+                if candidate:
+                    if candidate.email and candidate.email.strip().lower() != user_email:
+                        return Response({'error': 'This ID is already linked to another account.'}, status=403)
+                    candidate.email = user.email or user.username
+                    candidate.save()
+                    patient = candidate
 
             if not patient:
                 # Auto-create patient record if missing
@@ -633,21 +717,17 @@ class CompleteProfileView(APIView):
             return Response({'error': f'Patient lookup error: {str(e)}'}, status=500)
 
         # Handle ID (primary key) change if a new ID was provided (e.g. STU-2026-001)
-        new_id = data.get('id')
+        new_id = str(data.get('id') or '').strip()
         if new_id and new_id != patient.id:
             existing_target = Patient.objects.filter(id=new_id).first()
             if existing_target and existing_target.id != patient.id:
+                if existing_target.email and existing_target.email.strip().lower() != user_email:
+                    return Response({'error': 'This ID belongs to another registered account.'}, status=403)
                 existing_target.email = user.email or user.username
                 existing_target.save()
-                if patient.id != existing_target.id and not patient.consultations.exists():
-                    patient.delete()
-                patient = existing_target
+                patient = _rekey_patient_safely(patient, existing_target.id)
             else:
-                old_id = patient.id
-                patient.pk = new_id
-                patient.save()
-                Patient.objects.filter(id=old_id).delete()
-                patient = Patient.objects.get(id=new_id)
+                patient = _rekey_patient_safely(patient, new_id)
 
         # Update other fields
         fields_to_update = [
@@ -712,11 +792,13 @@ class SetPasswordView(APIView):
 
             patient = Patient.objects.filter(email__iexact=email).first()
             if not patient and patient_id:
-                patient = Patient.objects.filter(id__iexact=patient_id).first()
+                candidate = Patient.objects.filter(id__iexact=patient_id).first()
+                if candidate and (not candidate.email or candidate.email.strip().lower() == email):
+                    patient = candidate
 
             if patient:
-                # Claim the web patient record by attaching user email
-                if not patient.email or patient.email.strip().lower() != email:
+                # Claim the web patient record by attaching user email only if unclaimed
+                if not patient.email:
                     patient.email = email
                     patient.save()
 
@@ -768,6 +850,36 @@ class ChangePasswordView(APIView):
         user.set_password(new_password)
         user.save()
         return Response({'success': True, 'message': 'Password updated successfully.'}, status=status.HTTP_200_OK)
+
+class DeleteAccountView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        return self.delete(request)
+
+    def delete(self, request):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return Response({'error': 'Authentication required.'}, status=status.HTTP_401_UNAUTHORIZED)
+        if user.is_staff or user.is_superuser:
+            return Response({'error': 'Clinic admin accounts cannot be deleted from mobile.'}, status=status.HTTP_403_FORBIDDEN)
+        email = (user.email or user.username or '').strip()
+        try:
+            from .models import AuditLog
+            AuditLog.objects.create(
+                staff=None,
+                staff_name_snapshot=email[:150] or 'PATIENT',
+                staff_role_snapshot='Patient',
+                action='ACCOUNT_DELETED',
+                target_type='User',
+                target_id=str(user.pk),
+                details=f'Mobile user self-deleted account ({email})',
+            )
+        except Exception:
+            pass
+        user.delete()
+        return Response({'success': True, 'message': 'Account and associated personal data deleted.'}, status=status.HTTP_200_OK)
+
 
 def health(request):
     return JsonResponse({
@@ -985,28 +1097,35 @@ class CustomTokenObtainPairView(TokenObtainPairView):
 
 class CustomTokenRefreshView(TokenRefreshView):
     def post(self, request, *args, **kwargs):
-        refresh_token = request.COOKIES.get(settings.SIMPLE_JWT['AUTH_COOKIE'])
-        
-        if refresh_token:
-            request.data['refresh'] = refresh_token
+        cookie_refresh = request.COOKIES.get(settings.SIMPLE_JWT['AUTH_COOKIE'])
+        body_refresh = request.data.get('refresh') if hasattr(request.data, 'get') else None
+        refresh_token = cookie_refresh or body_refresh
+
+        if refresh_token and not body_refresh:
+            if hasattr(request.data, '_mutable'):
+                request.data._mutable = True
+                request.data['refresh'] = refresh_token
+            elif isinstance(request.data, dict):
+                request.data['refresh'] = refresh_token
 
         response = super().post(request, *args, **kwargs)
-        
+
         if response.status_code == 200:
-            access_token = response.data.get('access')
-            refresh_token = response.data.get('refresh')
-            
-            if refresh_token:
+            new_refresh = response.data.get('refresh') or refresh_token
+            if new_refresh:
                 response.set_cookie(
                     key=settings.SIMPLE_JWT['AUTH_COOKIE'],
-                    value=refresh_token,
+                    value=new_refresh,
                     expires=settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'],
                     secure=settings.SIMPLE_JWT['AUTH_COOKIE_SECURE'],
                     httponly=settings.SIMPLE_JWT['AUTH_COOKIE_HTTP_ONLY'],
                     samesite=settings.SIMPLE_JWT['AUTH_COOKIE_SAMESITE']
                 )
-                del response.data['refresh']
-                
+                if cookie_refresh and not body_refresh and 'refresh' in response.data:
+                    del response.data['refresh']
+                elif body_refresh and 'refresh' not in response.data:
+                    response.data['refresh'] = new_refresh
+
         return response
 
 class LogoutView(APIView):
@@ -1060,13 +1179,11 @@ class PatientViewSet(viewsets.ModelViewSet):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class ConsultationViewSet(viewsets.ModelViewSet):
-    queryset = Consultation.objects.prefetch_related('treatments').all()
+    queryset = Consultation.objects.prefetch_related('treatments').all().order_by('-date', '-timeIn')
     serializer_class = ConsultationSerializer
 
     def get_queryset(self):
-        qs = Consultation.objects.prefetch_related('treatments')
-        if self.action == 'list':
-            qs = qs.defer('prescriptionImage', 'fetcherIdImage')
+        qs = Consultation.objects.prefetch_related('treatments').order_by('-date', '-timeIn')
         patient_id = self.request.query_params.get('patient')
         if patient_id:
             return qs.filter(patient_id=patient_id)
@@ -1121,6 +1238,59 @@ class MedicineItemViewSet(viewsets.ModelViewSet):
             if existing:
                 return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
         return super().create(request, *args, **kwargs)
+
+    @action(detail=True, methods=['patch', 'post'], url_path='stock')
+    def update_stock(self, request, pk=None):
+        try:
+            qty = int(request.data.get('qty', 0))
+        except (ValueError, TypeError):
+            return Response({'error': 'Valid integer qty is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if qty <= 0:
+            return Response({'error': 'qty must be greater than 0.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        tx_type = (request.data.get('type') or 'dispense').strip().lower()
+        if tx_type not in ('add', 'dispense'):
+            return Response({'error': "type must be 'add' or 'dispense'."}, status=status.HTTP_400_BAD_REQUEST)
+        note = (request.data.get('note') or '').strip()
+
+        with transaction.atomic():
+            try:
+                med = MedicineItem.objects.select_for_update().get(pk=pk)
+            except MedicineItem.DoesNotExist:
+                return Response({'error': 'Medicine not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+            if tx_type == 'add':
+                med.stock = max(0, (med.stock or 0)) + qty
+                if med.beginningQty is None:
+                    med.beginningQty = med.stock
+            else:
+                actual_dispensed = min(max(0, med.stock or 0), qty)
+                med.stock = max(0, (med.stock or 0) - qty)
+                med.dispensed = (med.dispensed or 0) + (actual_dispensed if actual_dispensed > 0 else qty)
+
+            threshold = med.threshold if med.threshold is not None else 15
+            if med.stock <= 0:
+                med.status = 'Out of Stock'
+            elif med.stock <= threshold:
+                med.status = 'Low Stock'
+            else:
+                med.status = 'Normal'
+
+            med.save()
+            StockHistory.objects.create(
+                medicine=med,
+                qty=qty,
+                type=tx_type,
+                note=note or ('Stock added' if tx_type == 'add' else 'Dispensed'),
+            )
+
+        try:
+            from .gdrive_service import schedule_mirror
+            schedule_mirror('inventory')
+        except Exception:
+            pass
+
+        return Response(self.get_serializer(med).data, status=status.HTTP_200_OK)
 
 class StockHistoryViewSet(viewsets.ModelViewSet):
     queryset = StockHistory.objects.all()
@@ -1289,6 +1459,13 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
     serializer_class = TelemedicineRequestSerializer
     # permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        qs = TelemedicineRequest.objects.select_related('patient').all().order_by('-created_at')
+        patient_id = self.request.query_params.get('patient')
+        if patient_id:
+            return qs.filter(patient_id=patient_id)
+        return qs
+
     def create(self, request, *args, **kwargs):
         response = super().create(request, *args, **kwargs)
         if response.status_code == 201:
@@ -1410,6 +1587,13 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
     serializer_class = AppointmentRequestSerializer
     # permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        qs = AppointmentRequest.objects.select_related('patient').all().order_by('-created_at')
+        patient_id = self.request.query_params.get('patient')
+        if patient_id:
+            return qs.filter(patient_id=patient_id)
+        return qs
+
     def create(self, request, *args, **kwargs):
         response = super().create(request, *args, **kwargs)
         if response.status_code == 201:
@@ -1519,11 +1703,15 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         req_date = self.request.query_params.get('date')
+        patient_id = self.request.query_params.get('patient')
+        qs = PatientQueue.objects.select_related('patient')
+        if patient_id:
+            qs = qs.filter(patient_id=patient_id)
         if self.request.query_params.get('all') == 'true':
-            return PatientQueue.objects.select_related('patient').all().order_by('queue_number')
+            return qs.all().order_by('queue_number')
         if req_date:
-            return PatientQueue.objects.select_related('patient').filter(date=req_date).order_by('queue_number')
-        return PatientQueue.objects.select_related('patient').filter(date=timezone.localdate()).order_by('queue_number')
+            return qs.filter(date=req_date).order_by('queue_number')
+        return qs.filter(date=timezone.localdate()).order_by('queue_number')
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
@@ -1540,13 +1728,15 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
 
         # Check if patient already in queue and not done
         today = timezone.localdate()
-        existing = PatientQueue.objects.filter(patient_id=patient_id, status__in=['waiting', 'called'], date=today).first()
+        existing = PatientQueue.objects.select_for_update().filter(
+            patient_id=patient_id, status__in=['waiting', 'called'], date=today
+        ).first()
         if existing:
             serializer = self.get_serializer(existing)
             return Response(serializer.data, status=status.HTTP_200_OK)
             
-        # Get next queue number for today
-        last_queue = PatientQueue.objects.filter(date=today).order_by('-queue_number').first()
+        # Lock today's queue rows so concurrent check-ins never get duplicate queue_numbers
+        last_queue = PatientQueue.objects.select_for_update().filter(date=today).order_by('-queue_number').first()
         queue_number = 1 if not last_queue else last_queue.queue_number + 1
         
         queue = PatientQueue.objects.create(
@@ -1632,6 +1822,13 @@ class MedicalCertificateRequestViewSet(viewsets.ModelViewSet):
     queryset = MedicalCertificateRequest.objects.select_related('patient').all().order_by('-created_at')
     serializer_class = MedicalCertificateRequestSerializer
 
+    def get_queryset(self):
+        qs = MedicalCertificateRequest.objects.select_related('patient').all().order_by('-created_at')
+        patient_id = self.request.query_params.get('patient')
+        if patient_id:
+            return qs.filter(patient_id=patient_id)
+        return qs
+
     def create(self, request, *args, **kwargs):
         response = super().create(request, *args, **kwargs)
         if response.status_code == 201:
@@ -1647,8 +1844,10 @@ class MedicalCertificateRequestViewSet(viewsets.ModelViewSet):
         return response
 
     @action(detail=True, methods=['patch'])
+    @transaction.atomic
     def approve(self, request, pk=None):
-        medcert_req = self.get_object()
+        medcert_req = MedicalCertificateRequest.objects.select_for_update().select_related('patient').get(pk=pk)
+        was_already_approved = medcert_req.status == 'Approved'
         
         status_val = request.data.get('status', 'Approved')
         diagnosis = request.data.get('diagnosis') or medcert_req.diagnosis or medcert_req.complaint
@@ -1667,8 +1866,8 @@ class MedicalCertificateRequestViewSet(viewsets.ModelViewSet):
             medcert_req.remarks = remarks
         medcert_req.save()
 
-        if status_val == 'Approved':
-            cert_date = timezone.now().date()
+        if status_val == 'Approved' and not was_already_approved:
+            cert_date = timezone.localdate()
             MedicalCertificate.objects.create(
                 patient=medcert_req.patient,
                 date=cert_date,
@@ -1826,7 +2025,7 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
                 {'error': 'User Management password must be separate from the main CURA login password.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if current_password and not self._is_valid_mgmt_password(current_password):
+        if not current_password or not self._is_valid_mgmt_password(current_password):
             return Response(
                 {'error': 'Current or recovery password is incorrect.'},
                 status=status.HTTP_401_UNAUTHORIZED
@@ -1873,7 +2072,10 @@ class AuditLogViewSet(viewsets.ModelViewSet):
     serializer_class = AuditLogSerializer
 
     def get_queryset(self):
-        return AuditLog.objects.exclude(action='SYSTEM_GDRIVE_CONFIG').order_by('-timestamp')[:500]
+        qs = AuditLog.objects.exclude(action='SYSTEM_GDRIVE_CONFIG').order_by('-timestamp')
+        if getattr(self, 'action', None) == 'list':
+            return qs[:500]
+        return qs
 
     @action(detail=False, methods=['get', 'post'], url_path='drive-archives')
     def drive_archives(self, request):

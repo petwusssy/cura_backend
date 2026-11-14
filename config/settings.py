@@ -16,9 +16,6 @@ import dj_database_url
 import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
-import os
-
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -29,9 +26,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-xyj+2hfb9$ez=zoxg-saia*yx3m55e3!2nn3xv4^cc#kg4o==g')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = config('DEBUG', default=True, cast=bool)
+DEBUG = config('DEBUG', default=False, cast=bool)
 
-ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='*').split(',')
+ALLOWED_HOSTS = [h.strip() for h in config('ALLOWED_HOSTS', default='*').split(',') if h.strip()]
+
 
 
 # Application definition
@@ -66,6 +64,12 @@ SECURE_CROSS_ORIGIN_OPENER_POLICY = None
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
 SECURE_REFERRER_POLICY = 'strict-origin-when-cross-origin'
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+if not DEBUG:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
 FRONTEND_PUBLIC_URL = config('FRONTEND_PUBLIC_URL', default='https://cura-bice.vercel.app').rstrip('/')
 BACKEND_PUBLIC_URL = config('BACKEND_PUBLIC_URL', default='https://cura-backend-dvj5.onrender.com').rstrip('/')
@@ -190,7 +194,7 @@ CORS_ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https:\/\/.*\.vercel\.app$",
+    r"^https:\/\/cura(-bice|mobile)?(-[a-z0-9-]+)?\.vercel\.app$",
     r"^https?:\/\/localhost(:\d+)?$",
     r"^http:\/\/127\.0\.0\.1:\d+$",
     r"^http:\/\/192\.168\.\d+\.\d+:\d+$",
@@ -214,13 +218,17 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
-    )
+    ),
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '120/min',
+        'user': '600/min',
+    },
 }
 
 from datetime import timedelta
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=7),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
     'AUTH_COOKIE': 'refresh_token',  # Custom setting for our HttpOnly cookie
     'AUTH_COOKIE_SECURE': config('AUTH_COOKIE_SECURE', default=True, cast=bool),     # True in production (HTTPS)
     'AUTH_COOKIE_HTTP_ONLY': True,

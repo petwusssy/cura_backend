@@ -36,6 +36,7 @@ _FOLDER_MIME = 'application/vnd.google-apps.folder'
 
 # ponytail: in-process dict cache (512 items), swap for Redis/CDN only if multi-worker memory matters
 _MEDIA_CACHE: dict[str, tuple[bytes, str]] = {}
+_CACHE_LOCK = threading.Lock()
 _CREDS = None
 _LOCK = threading.Lock()
 _AUDIT_LOCK = threading.Lock()
@@ -274,9 +275,15 @@ def _extract_raw_bytes(value: str | bytes) -> bytes | None:
 
 
 def _cache_media(drive_id: str, raw_bytes: bytes, mime_type: str) -> None:
-    if len(_MEDIA_CACHE) >= 512:
-        _MEDIA_CACHE.pop(next(iter(_MEDIA_CACHE)))
-    _MEDIA_CACHE[drive_id] = (raw_bytes, mime_type)
+    with _CACHE_LOCK:
+        if len(_MEDIA_CACHE) >= 512:
+            _MEDIA_CACHE.pop(next(iter(_MEDIA_CACHE)), None)
+        _MEDIA_CACHE[drive_id] = (raw_bytes, mime_type)
+
+
+def _evict_media(drive_id: str, _default=None) -> None:
+    with _CACHE_LOCK:
+        _MEDIA_CACHE.pop(drive_id, None)
 
 
 def _append_daily_csv_oauth(
@@ -319,7 +326,7 @@ def _append_daily_csv_oauth(
 
         if real_file:
             if _update_drive_file(creds, real_file['id'], csv_bytes, 'text/csv'):
-                _MEDIA_CACHE.pop(real_file['id'], None)
+                _evict_media(real_file['id'], None)
         else:
             _upload_drive_file(creds, filename, csv_bytes, 'text/csv', folder_id)
 
@@ -401,8 +408,10 @@ def offload_image(value: str | bytes | None, category: str = 'avatar', label: st
 
 
 def fetch_media_from_drive(drive_id: str) -> tuple[bytes, str] | None:
-    if drive_id in _MEDIA_CACHE:
-        return _MEDIA_CACHE[drive_id]
+    with _CACHE_LOCK:
+        cached = _MEDIA_CACHE.get(drive_id)
+    if cached is not None:
+        return cached
 
     try:
         creds = _get_credentials()
@@ -571,16 +580,18 @@ def store_archive_file(
     }
 
     try:
-        from .models import AuditLog
-        is_audit_backup = folder_key == 'audit_logs'
-        AuditLog.objects.create(
-            staff_name_snapshot=staff_name or 'SYSTEM',
-            staff_role_snapshot='Archive Vault',
-            action='BACKUP_AUDIT_LOGS' if is_audit_backup else 'ARCHIVE_REPORT',
-            target_type='AuditLog' if is_audit_backup else 'Report',
-            target_id=drive_id,
-            details=json.dumps(info),
-        )
+        from django.conf import settings as dj_settings
+        if dj_settings.configured:
+            from .models import AuditLog
+            is_audit_backup = folder_key == 'audit_logs'
+            AuditLog.objects.create(
+                staff_name_snapshot=staff_name or 'SYSTEM',
+                staff_role_snapshot='Archive Vault',
+                action='BACKUP_AUDIT_LOGS' if is_audit_backup else 'ARCHIVE_REPORT',
+                target_type='AuditLog' if is_audit_backup else 'Report',
+                target_id=drive_id,
+                details=json.dumps(info),
+            )
     except Exception as exc:
         logger.warning(f"Failed to log archive to AuditLog: {exc}")
 
@@ -687,7 +698,7 @@ def _sync_consultation_worker(payload: dict):
                 json={'description': updated_csv},
                 timeout=8,
             )
-            _MEDIA_CACHE.pop(ledger_id, None)
+            _evict_media(ledger_id, None)
 
         # 2. Also create an individual human-readable entry inside today's ledger folder (Service Account mode only)
         if ledger_id:
@@ -844,7 +855,7 @@ def _sync_audit_log_worker(payload: dict):
                     json={'description': updated_csv},
                     timeout=8,
                 )
-                _MEDIA_CACHE.pop(ledger_id, None)
+                _evict_media(ledger_id, None)
             else:
                 roll_buf = io.StringIO()
                 roll_writer = csv.writer(roll_buf)
@@ -921,7 +932,7 @@ def _upsert_drive_csv(
         if _using_user_oauth(creds):
             if real_file:
                 if _update_drive_file(creds, real_file['id'], csv_bytes, 'text/csv'):
-                    _MEDIA_CACHE.pop(real_file['id'], None)
+                    _evict_media(real_file['id'], None)
             else:
                 _upload_drive_file(
                     creds, filename, csv_bytes, 'text/csv', folder_id,
@@ -937,7 +948,7 @@ def _upsert_drive_csv(
                 json={'description': csv_text[:24800]},
                 timeout=10,
             )
-            _MEDIA_CACHE.pop(legacy_folder['id'], None)
+            _evict_media(legacy_folder['id'], None)
         else:
             http_requests.post(
                 'https://www.googleapis.com/drive/v3/files?fields=id',
@@ -1230,6 +1241,14 @@ def run_mirror(key: str) -> None:
         fn()
     except Exception as exc:
         logger.warning(f"Live Drive mirror '{key}' warning: {exc}")
+    finally:
+        try:
+            from django.conf import settings as dj_settings
+            if dj_settings.configured:
+                from django.db import close_old_connections
+                close_old_connections()
+        except Exception:
+            pass
 
 
 # ponytail: 1.5s process-local debounce timers + single lock per mirror key; use Celery/Redis if horizontally scaled

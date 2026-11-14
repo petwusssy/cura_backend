@@ -10,13 +10,13 @@ class Patient(models.Model):
     ]
 
     id = models.CharField(max_length=50, primary_key=True)
-    name = models.CharField(max_length=255)
-    category = models.CharField(max_length=50, choices=CATEGORY_CHOICES)
+    name = models.CharField(max_length=255, db_index=True)
+    category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, db_index=True)
     contact = models.CharField(max_length=50)
     birthday = models.DateField()
     age = models.IntegerField()
     sex = models.CharField(max_length=20, blank=True, null=True)
-    email = models.EmailField(blank=True, null=True)
+    email = models.EmailField(blank=True, null=True, db_index=True)
     emergencyContact = models.CharField(max_length=255, blank=True, null=True)
     emergencyPhone = models.CharField(max_length=50, blank=True, null=True)
     course = models.CharField(max_length=100, blank=True, null=True)
@@ -53,7 +53,7 @@ class Consultation(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name='consultations')
-    date = models.DateField()
+    date = models.DateField(db_index=True)
     timeIn = models.TimeField()
     timeOut = models.TimeField(blank=True, null=True)
     complaint = models.TextField()
@@ -68,7 +68,7 @@ class Consultation(models.Model):
     nurseNotes = models.TextField(blank=True, null=True)
     recommendations = models.TextField(blank=True, null=True)
     followUp = models.CharField(max_length=255, blank=True, null=True)
-    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Consultation')
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Consultation', db_index=True)
     prescriptionImage = models.TextField(blank=True, null=True)
     transferred = models.BooleanField(default=False)
     dismissalDestination = models.CharField(max_length=50, blank=True, null=True)
@@ -109,11 +109,11 @@ class MedicineItem(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    name = models.CharField(max_length=255)
+    name = models.CharField(max_length=255, db_index=True)
     stock = models.IntegerField(default=0)
     unit = models.CharField(max_length=50)
     dateAdded = models.DateTimeField(auto_now_add=True)
-    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Normal')
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Normal', db_index=True)
     batchNumber = models.CharField(max_length=100, blank=True, null=True)
     beginningQty = models.IntegerField(blank=True, null=True)
     dispensed = models.IntegerField(default=0)
@@ -234,12 +234,12 @@ class AppNotification(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    type = models.CharField(max_length=50, choices=TYPE_CHOICES)
+    type = models.CharField(max_length=50, choices=TYPE_CHOICES, db_index=True)
     message = models.TextField()
-    time = models.DateTimeField(auto_now_add=True)
-    read = models.BooleanField(default=False)
+    time = models.DateTimeField(auto_now_add=True, db_index=True)
+    read = models.BooleanField(default=False, db_index=True)
     patientName = models.CharField(max_length=255, blank=True, null=True)
-    patient_id = models.CharField(max_length=255, blank=True, null=True)
+    patient_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
     nextDose = models.TimeField(blank=True, null=True)
     minutesLeft = models.IntegerField(blank=True, null=True)
 
@@ -249,7 +249,7 @@ class AppNotification(models.Model):
         super().save(*args, **kwargs)
 
 class OTPVerification(models.Model):
-    email = models.EmailField()
+    email = models.EmailField(db_index=True)
     otp = models.CharField(max_length=6)
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
@@ -341,8 +341,8 @@ class PatientQueue(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name='queues')
     queue_number = models.IntegerField()
-    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='waiting')
-    date = models.DateField(auto_now_add=True)
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='waiting', db_index=True)
+    date = models.DateField(auto_now_add=True, db_index=True)
     time_added = models.DateTimeField(auto_now_add=True)
     
     def __str__(self):
@@ -480,11 +480,11 @@ class AuditLog(models.Model):
     staff = models.ForeignKey(ClinicStaff, on_delete=models.SET_NULL, null=True, blank=True, related_name='audit_logs')
     staff_name_snapshot = models.CharField(max_length=150)
     staff_role_snapshot = models.CharField(max_length=80, blank=True, default='Staff Nurse')
-    action = models.CharField(max_length=100)
+    action = models.CharField(max_length=100, db_index=True)
     target_type = models.CharField(max_length=80, blank=True, default='')
     target_id = models.CharField(max_length=120, blank=True, default='')
     details = models.TextField(blank=True, default='')
-    timestamp = models.DateTimeField(auto_now_add=True)
+    timestamp = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
         ordering = ['-timestamp']

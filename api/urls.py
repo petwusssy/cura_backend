@@ -38,6 +38,7 @@ urlpatterns = [
     path('auth/verify-otp/', views.VerifyOTPView.as_view(), name='verify_otp'),
     path('auth/set-password/', views.SetPasswordView.as_view(), name='set_password'),
     path('auth/change-password/', views.ChangePasswordView.as_view(), name='change_password'),
+    path('auth/delete-account/', views.DeleteAccountView.as_view(), name='delete_account'),
     path('upload/', views.MediaUploadView.as_view(), name='media_upload'),
     path('upload/config/', views.MediaConfigView.as_view(), name='media_config'),
     path('media/<str:drive_id>/', views.serve_drive_media, name='serve_drive_media'),

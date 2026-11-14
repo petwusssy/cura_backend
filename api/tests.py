@@ -241,6 +241,42 @@ class PrivacySecurityTests(unittest.TestCase):
             fake_user.set_password.assert_called_once_with('NewPass123')
             fake_user.save.assert_called_once()
 
+    def test_change_admin_password_rejects_blank_current_password(self):
+        from rest_framework.test import APIRequestFactory
+        from api.views import ClinicStaffViewSet
+
+        factory = APIRequestFactory()
+        view = ClinicStaffViewSet.as_view({'post': 'change_admin_password'})
+        req = factory.post('/api/staff/change-admin-password/', {
+            'current_password': '',
+            'new_password': 'HackedPassword123',
+        }, format='json')
+        resp = view(req)
+        self.assertEqual(resp.status_code, 401)
+
+    def test_google_login_rejects_unsigned_forged_jwt(self):
+        from rest_framework.test import APIRequestFactory
+        from api.views import GoogleLoginView
+
+        factory = APIRequestFactory()
+        req = factory.post('/api/auth/google/', {
+            'id_token': 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJpc3MiOiJodHRwczovL3NlY3VyZXRva2VuLmdvb2dsZS5jb20vY3VyYS1jbGluaWMtNjViOTQiLCJhdWQiOiJjdXJhLWNsaW5pYy02NWI5NCIsImVtYWlsIjoiadmin@ua.edu.phIn0.',
+        }, format='json')
+        resp = GoogleLoginView.as_view()(req)
+        self.assertEqual(resp.status_code, 401)
+
+    def test_audit_log_queryset_only_slices_on_list(self):
+        from api.views import AuditLogViewSet
+
+        vs_list = AuditLogViewSet()
+        vs_list.action = 'list'
+        self.assertTrue(vs_list.get_queryset().query.is_sliced)
+
+        vs_detail = AuditLogViewSet()
+        vs_detail.action = 'retrieve'
+        self.assertFalse(vs_detail.get_queryset().query.is_sliced)
+
+
 
 
 

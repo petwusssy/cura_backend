@@ -321,6 +321,26 @@ class PrivacySecurityTests(unittest.TestCase):
         self.assertTrue(AppNotification.objects.filter(pk=patient_turn.id).exists())
         self.assertTrue(AppNotification.objects.filter(pk=patient_update.id).exists())
 
+    def test_verify_admin_rate_limits_after_five_failures(self):
+        from rest_framework.test import APIRequestFactory
+        from api.views import ClinicStaffViewSet
+
+        factory = APIRequestFactory()
+        view = ClinicStaffViewSet.as_view({'post': 'verify_admin'})
+
+        for expected_remaining in (4, 3, 2, 1):
+            req = factory.post('/api/staff/verify-admin/', {'password': 'wrong'}, format='json', REMOTE_ADDR='10.0.0.9')
+            resp = view(req)
+            self.assertEqual(resp.status_code, 401)
+            self.assertEqual(resp.data['attempts_remaining'], expected_remaining)
+            self.assertFalse(resp.data['is_locked'])
+
+        req_5 = factory.post('/api/staff/verify-admin/', {'password': 'wrong'}, format='json', REMOTE_ADDR='10.0.0.9')
+        resp_5 = view(req_5)
+        self.assertEqual(resp_5.status_code, 429)
+        self.assertTrue(resp_5.data['is_locked'])
+        self.assertEqual(resp_5.data['attempts_remaining'], 0)
+
 
 
 

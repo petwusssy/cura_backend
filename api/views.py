@@ -1961,21 +1961,73 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='verify-admin')
     def verify_admin(self, request):
+        from datetime import timedelta
         password = (request.data.get('password') or '').strip()
         if not password:
             return Response({'valid': False, 'error': 'Password is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        MAX_ATTEMPTS = 5
+        LOCKOUT_MINUTES = 1
+        now = timezone.now()
+        ip = (request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip() or request.META.get('REMOTE_ADDR') or 'global')
+        attempt, _ = LoginAttempt.objects.get_or_create(identifier=f"{self.USER_MGMT_SENTINEL}:{ip}"[:255])
+
+        if attempt.is_locked():
+            return Response(
+                {
+                    'valid': False,
+                    'is_locked': True,
+                    'attempts_remaining': 0,
+                    'max_attempts': MAX_ATTEMPTS,
+                    'lockout_seconds': max(1, attempt.remaining_seconds()),
+                    'error': 'Too many failed attempts. Please wait before trying again.',
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        if (attempt.locked_until and not attempt.is_locked()) or (
+            attempt.failed_attempts > 0 and attempt.last_attempt_at and (now - attempt.last_attempt_at) > timedelta(minutes=15)
+        ):
+            attempt.failed_attempts = 0
+            attempt.locked_until = None
+            attempt.save()
+
         env_configured = bool(self._get_env_mgmt_passwords())
         if self._is_valid_mgmt_password(password):
+            if attempt.failed_attempts > 0 or attempt.locked_until:
+                attempt.failed_attempts = 0
+                attempt.locked_until = None
+                attempt.save()
             return Response({'valid': True, 'env_configured': env_configured})
 
+        attempt.failed_attempts += 1
+        if attempt.failed_attempts >= MAX_ATTEMPTS:
+            attempt.locked_until = now + timedelta(minutes=LOCKOUT_MINUTES)
+            attempt.save()
+            return Response(
+                {
+                    'valid': False,
+                    'env_configured': env_configured,
+                    'is_locked': True,
+                    'attempts_remaining': 0,
+                    'max_attempts': MAX_ATTEMPTS,
+                    'lockout_seconds': LOCKOUT_MINUTES * 60,
+                    'error': 'Too many failed attempts. Please wait before trying again.',
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        attempt.save()
         return Response(
             {
                 'valid': False,
                 'env_configured': env_configured,
+                'is_locked': False,
+                'attempts_remaining': max(1, MAX_ATTEMPTS - attempt.failed_attempts),
+                'max_attempts': MAX_ATTEMPTS,
                 'error': 'Incorrect User Management password.',
             },
-            status=status.HTTP_401_UNAUTHORIZED
+            status=status.HTTP_401_UNAUTHORIZED,
         )
 
     @action(detail=False, methods=['post'], url_path='change-admin-password')

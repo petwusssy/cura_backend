@@ -656,6 +656,101 @@ class PrivacySecurityTests(unittest.TestCase):
             StockHistory.objects.filter(medicine=med).delete()
             MedicineItem.objects.filter(id=med.id).delete()
 
+    def test_medcert_fields_are_encrypted_at_rest_and_transparent_via_api(self):
+        import uuid
+        from datetime import date
+        from django.db import connection
+        from rest_framework.test import APIRequestFactory
+        from api.models import AppNotification, MedicalCertificate, Patient
+        from api.views import MedicalCertificateViewSet
+
+        factory = APIRequestFactory()
+        patient = Patient.objects.create(
+            id='__TEST_MC_ENC__',
+            name='JUAN DELA CRUZ',
+            category='Student',
+            contact='09170000000',
+            birthday=date(2004, 1, 15),
+            age=22,
+        )
+        legacy_id = uuid.uuid4()
+        try:
+            create_view = MedicalCertificateViewSet.as_view({'post': 'create'})
+            payload = {
+                'patient': patient.id,
+                'date': '2026-11-15',
+                'purpose': 'Class Excuse',
+                'diagnosis': 'Acute Tonsillitis',
+                'recommendation': 'Rest for 2 days',
+                'doctor': 'Dr. Santos',
+                'issuedBy': 'UA CLINIC',
+                'notes': 'Temp 38.5C',
+            }
+            resp = create_view(factory.post('/api/certificates/', payload, format='json'))
+            self.assertEqual(resp.status_code, 201)
+            self.assertEqual(resp.data['diagnosis'], 'Acute Tonsillitis')
+            self.assertEqual(resp.data['recommendation'], 'Rest for 2 days')
+            self.assertEqual(resp.data['notes'], 'Temp 38.5C')
+
+            cert_id = resp.data['id']
+
+            # Duplicate check must still match encrypted diagnosis cleanly
+            dup_resp = create_view(factory.post('/api/certificates/', payload, format='json'))
+            self.assertEqual(dup_resp.status_code, 200)
+            self.assertEqual(dup_resp.data['id'], cert_id)
+
+            # Raw SQL row at rest must contain ciphertext, never plaintext
+            table = MedicalCertificate._meta.db_table
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f'SELECT diagnosis, recommendation, notes FROM "{table}" WHERE id = %s',
+                    [str(cert_id).replace('-', '') if connection.vendor == 'sqlite' else str(cert_id)],
+                )
+                raw_diag, raw_rec, raw_notes = cursor.fetchone()
+            self.assertTrue(raw_diag.startswith('enc:v1:'))
+            self.assertNotIn('Acute Tonsillitis', raw_diag)
+            self.assertTrue(raw_rec.startswith('enc:v1:'))
+            self.assertNotIn('Rest for 2 days', raw_rec)
+            self.assertTrue(raw_notes.startswith('enc:v1:'))
+
+            # ORM & API transparently decrypt back to plaintext
+            loaded = MedicalCertificate.objects.get(pk=cert_id)
+            self.assertEqual(loaded.diagnosis, 'Acute Tonsillitis')
+            self.assertEqual(loaded.recommendation, 'Rest for 2 days')
+            self.assertEqual(loaded.notes, 'Temp 38.5C')
+
+            # Legacy unencrypted rows remain readable without migration errors
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f'INSERT INTO "{table}" (id, patient_id, date, purpose, diagnosis, recommendation, notes) '
+                    'VALUES (%s, %s, %s, %s, %s, %s, %s)',
+                    [
+                        legacy_id.hex if connection.vendor == 'sqlite' else str(legacy_id),
+                        patient.id,
+                        '2026-10-01',
+                        'Legacy Clearance',
+                        'Migraine',
+                        'Hydrate',
+                        'Legacy plain row',
+                    ],
+                )
+            legacy_loaded = MedicalCertificate.objects.get(pk=legacy_id)
+            self.assertEqual(legacy_loaded.diagnosis, 'Migraine')
+            self.assertEqual(legacy_loaded.notes, 'Legacy plain row')
+
+            # Tampered ciphertext fails integrity check cleanly instead of returning forged data
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f'UPDATE "{table}" SET diagnosis = %s WHERE id = %s',
+                    ['enc:v1:tampered_invalid_ciphertext', str(cert_id).replace('-', '') if connection.vendor == 'sqlite' else str(cert_id)],
+                )
+            tampered = MedicalCertificate.objects.get(pk=cert_id)
+            self.assertEqual(tampered.diagnosis, '[Encrypted]')
+        finally:
+            AppNotification.objects.filter(patient_id=patient.id).delete()
+            MedicalCertificate.objects.filter(patient=patient).delete()
+            Patient.objects.filter(id=patient.id).delete()
+
 
 
 

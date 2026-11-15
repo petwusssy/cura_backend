@@ -1456,12 +1456,17 @@ class MedicalCertificateViewSet(viewsets.ModelViewSet):
         purpose = serializer.validated_data.get('purpose', '')
         diagnosis = serializer.validated_data.get('diagnosis', '')
 
-        existing = MedicalCertificate.objects.filter(
-            patient=patient,
-            date=date,
-            purpose=purpose,
-            diagnosis=diagnosis
-        ).first()
+        existing = next(
+            (
+                cert for cert in MedicalCertificate.objects.filter(
+                    patient=patient,
+                    date=date,
+                    purpose=purpose,
+                )
+                if (cert.diagnosis or '') == (diagnosis or '')
+            ),
+            None,
+        )
 
         if existing:
             return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)

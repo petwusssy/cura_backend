@@ -1,6 +1,66 @@
+import base64
+import hashlib
+import os
 import uuid
+from cryptography.fernet import Fernet, InvalidToken
+from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import User
+
+_MEDCERT_ENC_PREFIX = 'enc:v1:'
+
+
+def _get_medcert_fernet() -> Fernet:
+    """Return Fernet cipher keyed from MEDCERT_ENCRYPTION_KEY or Django SECRET_KEY."""
+    raw_key = (os.environ.get('MEDCERT_ENCRYPTION_KEY') or '').strip()
+    if raw_key:
+        try:
+            return Fernet(raw_key.encode('utf-8'))
+        except Exception:
+            seed = raw_key.encode('utf-8')
+    else:
+        seed = (settings.SECRET_KEY or 'cura-dev-fallback').encode('utf-8')
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(seed).digest()))
+
+
+def encrypt_medcert_value(value):
+    if value is None or value == '':
+        return value
+    text = str(value)
+    if text.startswith(_MEDCERT_ENC_PREFIX):
+        return text
+    token = _get_medcert_fernet().encrypt(text.encode('utf-8')).decode('ascii')
+    return f'{_MEDCERT_ENC_PREFIX}{token}'
+
+
+def decrypt_medcert_value(value):
+    if value is None or value == '':
+        return value
+    text = str(value)
+    if not text.startswith(_MEDCERT_ENC_PREFIX):
+        return text
+    token = text[len(_MEDCERT_ENC_PREFIX):].encode('ascii')
+    try:
+        return _get_medcert_fernet().decrypt(token).decode('utf-8')
+    except InvalidToken:
+        return '[Encrypted]'
+
+
+class EncryptedTextField(models.TextField):
+    """Transparent Fernet AES-128+HMAC field-level encryption with zero schema change."""
+
+    def deconstruct(self):
+        name, _, args, kwargs = super().deconstruct()
+        return name, 'django.db.models.TextField', args, kwargs
+
+    def from_db_value(self, value, expression, connection):
+        return decrypt_medcert_value(value)
+
+    def to_python(self, value):
+        return decrypt_medcert_value(value)
+
+    def get_prep_value(self, value):
+        return encrypt_medcert_value(value)
 
 class Patient(models.Model):
     CATEGORY_CHOICES = [
@@ -167,11 +227,11 @@ class MedicalCertificate(models.Model):
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE)
     date = models.DateField()
     purpose = models.CharField(max_length=255)
-    diagnosis = models.TextField(blank=True, null=True)
-    recommendation = models.TextField(blank=True, null=True)
+    diagnosis = EncryptedTextField(blank=True, null=True)
+    recommendation = EncryptedTextField(blank=True, null=True)
     doctor = models.CharField(max_length=255, blank=True, null=True)
     issuedBy = models.CharField(max_length=255, blank=True, null=True)
-    notes = models.TextField(blank=True, null=True)
+    notes = EncryptedTextField(blank=True, null=True)
 
 class Bed(models.Model):
     STATUS_CHOICES = [

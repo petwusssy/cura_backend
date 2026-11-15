@@ -536,6 +536,38 @@ class PrivacySecurityTests(unittest.TestCase):
             LoginAttempt.objects.filter(identifier=f'otp:{email}').delete()
             User.objects.filter(username=email).delete()
 
+    def test_verify_pin_rate_limits_after_five_failures(self):
+        from django.contrib.auth.hashers import make_password
+        from rest_framework.test import APIRequestFactory
+        from api.models import ClinicStaff, LoginAttempt
+        from api.views import ClinicStaffViewSet, STAFF_PIN_SENTINEL
+
+        factory = APIRequestFactory()
+        view = ClinicStaffViewSet.as_view({'post': 'verify_pin'})
+        LoginAttempt.objects.filter(identifier__startswith=STAFF_PIN_SENTINEL).delete()
+        staff = ClinicStaff.objects.create(
+            name='__TEST_PIN_NURSE__',
+            role='Nurse',
+            pin_hash=make_password('4829'),
+            is_active=True,
+        )
+        try:
+            for _ in range(4):
+                resp = view(factory.post('/api/staff/verify-pin/', {'pin': '0000'}, format='json'))
+                self.assertEqual(resp.status_code, 401)
+                self.assertFalse(resp.data['is_locked'])
+
+            fifth = view(factory.post('/api/staff/verify-pin/', {'pin': '0000'}, format='json'))
+            self.assertEqual(fifth.status_code, 429)
+            self.assertTrue(fifth.data['is_locked'])
+
+            blocked = view(factory.post('/api/staff/verify-pin/', {'pin': '4829'}, format='json'))
+            self.assertEqual(blocked.status_code, 429)
+            self.assertTrue(blocked.data['is_locked'])
+        finally:
+            ClinicStaff.objects.filter(id=staff.id).delete()
+            LoginAttempt.objects.filter(identifier__startswith=STAFF_PIN_SENTINEL).delete()
+
 
 
 

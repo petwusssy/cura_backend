@@ -1923,6 +1923,79 @@ from .models import ClinicStaff, AuditLog
 from .serializers import ClinicStaffSerializer, AuditLogSerializer
 
 
+STAFF_PIN_SENTINEL = '__CURA_STAFF_PIN_LOCKOUT__'
+
+
+def _get_lockout_attempt(request, prefix, max_attempts=5):
+    from datetime import timedelta
+    now = timezone.now()
+    ip = (request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip() or request.META.get('REMOTE_ADDR') or 'global')
+    attempt, _ = LoginAttempt.objects.get_or_create(identifier=f"{prefix}:{ip}"[:255])
+
+    if attempt.is_locked():
+        return attempt, Response(
+            {
+                'valid': False,
+                'is_locked': True,
+                'attempts_remaining': 0,
+                'max_attempts': max_attempts,
+                'lockout_seconds': max(1, attempt.remaining_seconds()),
+                'error': 'Too many failed attempts. Please wait before trying again.',
+            },
+            status=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+
+    if (attempt.locked_until and not attempt.is_locked()) or (
+        attempt.failed_attempts > 0 and attempt.last_attempt_at and (now - attempt.last_attempt_at) > timedelta(minutes=15)
+    ):
+        attempt.failed_attempts = 0
+        attempt.locked_until = None
+        attempt.save()
+
+    return attempt, None
+
+
+def _clear_lockout_attempt(attempt):
+    if attempt.failed_attempts > 0 or attempt.locked_until:
+        attempt.failed_attempts = 0
+        attempt.locked_until = None
+        attempt.save()
+
+
+def _record_lockout_failure(attempt, invalid_error, max_attempts=5, lockout_minutes=1, extra=None):
+    from datetime import timedelta
+    payload_extra = extra or {}
+    attempt.failed_attempts += 1
+    if attempt.failed_attempts >= max_attempts:
+        attempt.locked_until = timezone.now() + timedelta(minutes=lockout_minutes)
+        attempt.save()
+        return Response(
+            {
+                'valid': False,
+                **payload_extra,
+                'is_locked': True,
+                'attempts_remaining': 0,
+                'max_attempts': max_attempts,
+                'lockout_seconds': lockout_minutes * 60,
+                'error': 'Too many failed attempts. Please wait before trying again.',
+            },
+            status=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+
+    attempt.save()
+    return Response(
+        {
+            'valid': False,
+            **payload_extra,
+            'is_locked': False,
+            'attempts_remaining': max(1, max_attempts - attempt.failed_attempts),
+            'max_attempts': max_attempts,
+            'error': invalid_error,
+        },
+        status=status.HTTP_401_UNAUTHORIZED,
+    )
+
+
 class ClinicStaffViewSet(viewsets.ModelViewSet):
     queryset = ClinicStaff.objects.all().order_by('name')
     serializer_class = ClinicStaffSerializer
@@ -1931,73 +2004,23 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='verify-admin')
     def verify_admin(self, request):
-        from datetime import timedelta
         password = (request.data.get('password') or '').strip()
         if not password:
             return Response({'valid': False, 'error': 'Password is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        MAX_ATTEMPTS = 5
-        LOCKOUT_MINUTES = 1
-        now = timezone.now()
-        ip = (request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip() or request.META.get('REMOTE_ADDR') or 'global')
-        attempt, _ = LoginAttempt.objects.get_or_create(identifier=f"{USER_MGMT_SENTINEL}:{ip}"[:255])
-
-        if attempt.is_locked():
-            return Response(
-                {
-                    'valid': False,
-                    'is_locked': True,
-                    'attempts_remaining': 0,
-                    'max_attempts': MAX_ATTEMPTS,
-                    'lockout_seconds': max(1, attempt.remaining_seconds()),
-                    'error': 'Too many failed attempts. Please wait before trying again.',
-                },
-                status=status.HTTP_429_TOO_MANY_REQUESTS,
-            )
-
-        if (attempt.locked_until and not attempt.is_locked()) or (
-            attempt.failed_attempts > 0 and attempt.last_attempt_at and (now - attempt.last_attempt_at) > timedelta(minutes=15)
-        ):
-            attempt.failed_attempts = 0
-            attempt.locked_until = None
-            attempt.save()
+        attempt, locked_response = _get_lockout_attempt(request, USER_MGMT_SENTINEL)
+        if locked_response is not None:
+            return locked_response
 
         env_configured = bool(get_env_mgmt_passwords())
         if is_valid_mgmt_password(password):
-            if attempt.failed_attempts > 0 or attempt.locked_until:
-                attempt.failed_attempts = 0
-                attempt.locked_until = None
-                attempt.save()
+            _clear_lockout_attempt(attempt)
             return Response({'valid': True, 'env_configured': env_configured})
 
-        attempt.failed_attempts += 1
-        if attempt.failed_attempts >= MAX_ATTEMPTS:
-            attempt.locked_until = now + timedelta(minutes=LOCKOUT_MINUTES)
-            attempt.save()
-            return Response(
-                {
-                    'valid': False,
-                    'env_configured': env_configured,
-                    'is_locked': True,
-                    'attempts_remaining': 0,
-                    'max_attempts': MAX_ATTEMPTS,
-                    'lockout_seconds': LOCKOUT_MINUTES * 60,
-                    'error': 'Too many failed attempts. Please wait before trying again.',
-                },
-                status=status.HTTP_429_TOO_MANY_REQUESTS,
-            )
-
-        attempt.save()
-        return Response(
-            {
-                'valid': False,
-                'env_configured': env_configured,
-                'is_locked': False,
-                'attempts_remaining': max(1, MAX_ATTEMPTS - attempt.failed_attempts),
-                'max_attempts': MAX_ATTEMPTS,
-                'error': 'Incorrect User Management password.',
-            },
-            status=status.HTTP_401_UNAUTHORIZED,
+        return _record_lockout_failure(
+            attempt,
+            'Incorrect User Management password.',
+            extra={'env_configured': env_configured},
         )
 
     @action(detail=False, methods=['post'], url_path='change-admin-password')
@@ -2045,8 +2068,13 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        attempt, locked_response = _get_lockout_attempt(request, STAFF_PIN_SENTINEL)
+        if locked_response is not None:
+            return locked_response
+
         for staff_member in ClinicStaff.objects.filter(is_active=True):
             if check_password(pin, staff_member.pin_hash):
+                _clear_lockout_attempt(attempt)
                 return Response({
                     'valid': True,
                     'staff': {
@@ -2056,10 +2084,7 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
                     }
                 })
 
-        return Response(
-            {'valid': False, 'error': 'Invalid or inactive 4-digit PIN.'},
-            status=status.HTTP_401_UNAUTHORIZED
-        )
+        return _record_lockout_failure(attempt, 'Invalid or inactive 4-digit PIN.')
 
 
 class AuditLogViewSet(viewsets.ModelViewSet):

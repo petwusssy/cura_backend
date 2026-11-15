@@ -174,6 +174,29 @@ class DriveOAuthTests(unittest.TestCase):
             gs.time.sleep(0.15)
             self.assertEqual(ran, ['appointments'])
 
+    def test_drive_timestamps_use_manila_time(self):
+        from datetime import datetime, timezone as dt_tz
+        # 2026-11-14 23:45 UTC == 2026-11-15 07:45 AM Asia/Manila (+08:00)
+        utc_dt = datetime(2026, 11, 14, 23, 45, 12, tzinfo=dt_tz.utc)
+        self.assertEqual(gs._fmt_manila(utc_dt, '%Y-%m-%d'), '2026-11-15')
+        self.assertEqual(gs._fmt_manila(utc_dt, '%Y-%m-%d %I:%M %p'), '2026-11-15 07:45 AM')
+        self.assertEqual(gs._fmt_manila(utc_dt), '2026-11-15 07:45:12 AM')
+
+        captured = {}
+        class FakeThread:
+            def __init__(self, target=None, args=(), daemon=False):
+                captured['payload'] = args[0]
+            def start(self):
+                pass
+        fake_log = MagicMock(
+            action='STAFF_LOGIN', staff_name_snapshot='NURSE', staff_role_snapshot='Head Nurse',
+            target_type='Staff', target_id='1', details='ok', timestamp=utc_dt,
+        )
+        with patch('api.gdrive_service.threading.Thread', FakeThread):
+            gs.trigger_live_audit_sync(fake_log)
+        self.assertEqual(captured['payload']['date'], '2026-11-15')
+        self.assertEqual(captured['payload']['timestamp'], '2026-11-15 07:45:12 AM')
+
 
 class PrivacySecurityTests(unittest.TestCase):
     @classmethod

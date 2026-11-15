@@ -2053,7 +2053,7 @@ class AuditLogViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get', 'post'], url_path='drive-archives')
     def drive_archives(self, request):
-        from .gdrive_service import SUBFOLDER_IDS, list_drive_archives, store_archive_file
+        from .gdrive_service import SUBFOLDER_IDS, _fmt_manila, list_drive_archives, store_archive_file
         audit_folder_id = SUBFOLDER_IDS['audit_logs']
         folder_url = f"https://drive.google.com/drive/folders/{audit_folder_id}"
 
@@ -2074,7 +2074,7 @@ class AuditLogViewSet(viewsets.ModelViewSet):
         # ponytail: capped at 5000 rows (~1-2MB CSV) to bound snapshot memory/runtime per request
         for log in AuditLog.objects.exclude(action='SYSTEM_GDRIVE_CONFIG').order_by('-timestamp')[:5000]:
             writer.writerow([
-                log.timestamp.isoformat() if log.timestamp else '',
+                _fmt_manila(log.timestamp),
                 log.staff_name_snapshot or '',
                 log.staff_role_snapshot or '',
                 log.action or '',

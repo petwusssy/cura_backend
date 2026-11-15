@@ -47,8 +47,20 @@ _MIRROR_LOCKS: dict[str, threading.Lock] = {}
 _SEEDED_MIRRORS = False
 
 
+_MANILA_TZ = dt_timezone(timedelta(hours=8))
+
+
 def _manila_now() -> datetime:
-    return datetime.now(dt_timezone(timedelta(hours=8)))
+    return datetime.now(_MANILA_TZ)
+
+
+def _fmt_manila(val, fmt: str = '%Y-%m-%d %I:%M:%S %p') -> str:
+    if not val:
+        return ''
+    if isinstance(val, datetime):
+        dt = val.replace(tzinfo=dt_timezone.utc) if val.tzinfo is None else val
+        return dt.astimezone(_MANILA_TZ).strftime(fmt)
+    return str(val)[:19]
 
 
 def _load_db_credentials_json() -> dict | None:
@@ -574,7 +586,7 @@ def store_archive_file(
         'sha256': sha256_hash,
         'size_bytes': len(raw_bytes),
         'staff_name': staff_name,
-        'created_at': node.get('createdTime') or datetime.utcnow().isoformat() + 'Z',
+        'created_at': node.get('createdTime') or _manila_now().isoformat(),
         'download_url': f"{BACKEND_PUBLIC_URL}/api/reports/archives/{drive_id}/download/",
         'drive_url': _drive_url(drive_id, node_mime),
     }
@@ -757,7 +769,7 @@ def trigger_live_consultation_sync(consultation) -> None:
             'earlyDismissal': bool(consultation.earlyDismissal),
             'dismissalDestination': str(consultation.dismissalDestination or ''),
             'nurseNotes': str(consultation.nurseNotes or consultation.operationalNotes or ''),
-            'synced_at': datetime.utcnow().isoformat() + 'Z',
+            'synced_at': _manila_now().isoformat(),
         }
         threading.Thread(target=_sync_consultation_worker, args=(payload,), daemon=True).start()
     except Exception as exc:
@@ -882,10 +894,10 @@ def trigger_live_audit_sync(audit_log) -> None:
         action = str(getattr(audit_log, 'action', '') or '')
         if action == 'SYSTEM_GDRIVE_CONFIG':
             return
-        ts = getattr(audit_log, 'timestamp', None) or datetime.utcnow()
+        ts = getattr(audit_log, 'timestamp', None) or _manila_now()
         payload = {
-            'date': ts.strftime('%Y-%m-%d') if hasattr(ts, 'strftime') else _manila_now().strftime('%Y-%m-%d'),
-            'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+            'date': _fmt_manila(ts, '%Y-%m-%d') if isinstance(ts, datetime) else _manila_now().strftime('%Y-%m-%d'),
+            'timestamp': _fmt_manila(ts),
             'staff_name': str(getattr(audit_log, 'staff_name_snapshot', '') or 'SYSTEM'),
             'staff_role': str(getattr(audit_log, 'staff_role_snapshot', '') or 'Staff'),
             'action': action,
@@ -1122,7 +1134,7 @@ def _mirror_inventory() -> None:
             str(m.id), m.name, m.category, m.unit,
             m.beginningQty if m.beginningQty is not None else '',
             m.stock, max(m.dispensed or 0, hist_dispensed),
-            m.threshold, m.status, m.batchNumber or '', str(m.dateAdded)[:10],
+            m.threshold, m.status, m.batchNumber or '', _fmt_manila(m.dateAdded, '%Y-%m-%d'),
         ])
     _upsert_drive_csv(
         SUBFOLDER_IDS['live_reports'], 'Inventory_Medicines.csv',
@@ -1132,7 +1144,7 @@ def _mirror_inventory() -> None:
     )
 
     hist_rows = [
-        [str(h.date)[:19], str(h.medicine_id), h.medicine.name, h.medicine.category, h.type, h.qty, h.note or '']
+        [_fmt_manila(h.date, '%Y-%m-%d %I:%M %p'), str(h.medicine_id), h.medicine.name, h.medicine.category, h.type, h.qty, h.note or '']
         for h in StockHistory.objects.select_related('medicine').all().order_by('-date')[:2000]
     ]
     _upsert_drive_csv(
@@ -1168,7 +1180,7 @@ def _mirror_appointments() -> None:
             r.patient.category if r.patient else '', r.visit_type, r.reason,
             str(r.preferred_date), r.preferred_time,
             str(r.scheduled_date or ''), r.scheduled_time or '',
-            r.status, str(r.updated_at)[:19],
+            r.status, _fmt_manila(r.updated_at, '%Y-%m-%d %I:%M %p'),
         ]
         for r in AppointmentRequest.objects.select_related('patient').all().order_by('-created_at')[:2000]
     ]
@@ -1189,7 +1201,7 @@ def _mirror_telemedicine() -> None:
             r.patient.category if r.patient else '', r.reason,
             str(r.preferred_date), r.preferred_time,
             str(r.scheduled_date or ''), r.scheduled_time or '',
-            r.meeting_link or '', r.status, str(r.updated_at)[:19],
+            r.meeting_link or '', r.status, _fmt_manila(r.updated_at, '%Y-%m-%d %I:%M %p'),
         ]
         for r in TelemedicineRequest.objects.select_related('patient').all().order_by('-created_at')[:2000]
     ]

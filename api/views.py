@@ -1390,7 +1390,7 @@ class PurchaseRequestViewSet(viewsets.ModelViewSet):
         ids = request.data.get('ids') or []
         prf_no = (request.data.get('prfNo') or '').strip()
         reason = (request.data.get('reason') or '').strip()
-        staff_name = (request.data.get('staffName') or '').strip()
+        staff_name = (request.data.get('staffName') or request.data.get('staff_name') or '').strip()
 
         if not isinstance(ids, list) and not prf_no:
             return Response({'error': 'ids list or prfNo is required.'}, status=status.HTTP_400_BAD_REQUEST)

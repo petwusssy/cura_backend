@@ -489,10 +489,52 @@ class PrivacySecurityTests(unittest.TestCase):
                 lock_resp = avail_view(factory.post(f'{url}availability/', {'is_locked': True}, format='json'))
                 self.assertTrue(lock_resp.data['is_locked'])
                 self.assertEqual(lock_resp.data['unavailable_times'], ['8:00 AM - 9:00 AM'])
+                self.assertIn('booked_slots', get_resp.data)
             finally:
                 avail_cls.objects.all().delete()
                 if snapshot is not None:
                     avail_cls.objects.create(unavailable_dates=snapshot[0], unavailable_times=snapshot[1])
+
+    def test_otp_failure_returns_503_and_forgot_password_flow_works(self):
+        from django.contrib.auth.models import User
+        from rest_framework.test import APIRequestFactory
+        from api.models import LoginAttempt, OTPVerification
+        from api.views import RequestOTPView, VerifyOTPView, SetPasswordView
+
+        factory = APIRequestFactory()
+        email = '__test_otp_patient__@ua.edu.ph'
+        User.objects.filter(username=email).delete()
+        OTPVerification.objects.filter(email=email).delete()
+        LoginAttempt.objects.filter(identifier=f'otp:{email}').delete()
+        u = User.objects.create_user(username=email, email=email, password='OldPassword1')
+        try:
+            with patch('api.views._send_clinic_email', return_value=False):
+                fail_resp = RequestOTPView.as_view()(factory.post('/api/auth/request-otp/', {'email': email}, format='json'))
+                self.assertEqual(fail_resp.status_code, 503)
+
+            with patch('api.views._send_clinic_email', return_value=True):
+                ok_resp = RequestOTPView.as_view()(factory.post('/api/auth/request-otp/', {'email': email}, format='json'))
+                self.assertEqual(ok_resp.status_code, 200)
+
+            code = OTPVerification.objects.filter(email=email).latest('id').otp
+            verify_resp = VerifyOTPView.as_view()(factory.post('/api/auth/verify-otp/', {'email': email, 'otp': code}, format='json'))
+            self.assertEqual(verify_resp.status_code, 200)
+
+            # OTP replay to verify-otp must fail
+            replay_resp = VerifyOTPView.as_view()(factory.post('/api/auth/verify-otp/', {'email': email, 'otp': code}, format='json'))
+            self.assertEqual(replay_resp.status_code, 400)
+
+            # Forgot password Step 3 (SetPasswordView) succeeds and consumes OTP
+            reset_resp = SetPasswordView.as_view()(factory.post('/api/auth/set-password/', {'email': email, 'password': 'NewPassword2'}, format='json'))
+            self.assertEqual(reset_resp.status_code, 200)
+            self.assertIn('access', reset_resp.data)
+            u.refresh_from_db()
+            self.assertTrue(u.check_password('NewPassword2'))
+            self.assertFalse(OTPVerification.objects.filter(email=email).exists())
+        finally:
+            OTPVerification.objects.filter(email=email).delete()
+            LoginAttempt.objects.filter(identifier=f'otp:{email}').delete()
+            User.objects.filter(username=email).delete()
 
 
 

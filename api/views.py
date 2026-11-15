@@ -377,6 +377,65 @@ class CheckEmailView(APIView):
             'missing_fields': missing_fields
         })
 
+def _send_clinic_email(to_email: str, subject: str, text_body: str, html_body: str = '') -> bool:
+    """Deliver transactional clinic email via Brevo -> Resend -> Gmail SMTP fallback."""
+    import logging
+    clean_to = (to_email or '').strip()
+    if not clean_to:
+        return False
+    log = logging.getLogger(__name__)
+    html_content = html_body or f"<p>{text_body}</p>"
+
+    brevo_key = getattr(settings, 'BREVO_API_KEY', '')
+    if brevo_key:
+        try:
+            import requests as http_requests
+            sender_email = getattr(settings, 'BREVO_SENDER_EMAIL', 'curaclinic.ua@gmail.com')
+            r = http_requests.post(
+                'https://api.brevo.com/v3/smtp/email',
+                headers={'api-key': brevo_key, 'Content-Type': 'application/json'},
+                json={
+                    'sender': {'name': 'CURA Clinic', 'email': sender_email},
+                    'to': [{'email': clean_to}],
+                    'subject': subject,
+                    'htmlContent': html_content,
+                },
+                timeout=5,
+            )
+            if r.status_code in (200, 201):
+                return True
+        except Exception as e:
+            log.warning(f"Brevo email API error: {e}")
+
+    resend_key = getattr(settings, 'RESEND_API_KEY', '')
+    if resend_key:
+        try:
+            import requests as http_requests
+            r = http_requests.post(
+                'https://api.resend.com/emails',
+                headers={'Authorization': f'Bearer {resend_key}', 'Content-Type': 'application/json'},
+                json={
+                    'from': 'CURA Clinic <onboarding@resend.dev>',
+                    'to': [clean_to],
+                    'subject': subject,
+                    'html': html_content,
+                },
+                timeout=5,
+            )
+            if r.status_code in (200, 201):
+                return True
+        except Exception as e:
+            log.warning(f"Resend email API error: {e}")
+
+    try:
+        from django.core.mail import send_mail
+        send_mail(subject, text_body, settings.DEFAULT_FROM_EMAIL, [clean_to], fail_silently=False, html_message=html_content)
+        return True
+    except Exception as mail_err:
+        log.warning(f"SMTP send failed (Render port block): {mail_err}")
+        return False
+
+
 class RequestOTPView(APIView):
     permission_classes = [AllowAny]
     def post(self, request):
@@ -420,7 +479,6 @@ class RequestOTPView(APIView):
                 is_verified=False
             )
         
-        from django.core.mail import send_mail
         subject = f"CURA Clinic - Verification Code: {otp}"
         message = (
             f"Hello,\n\n"
@@ -453,64 +511,11 @@ class RequestOTPView(APIView):
           </p>
         </div>
         """
-        email_sent = False
-        brevo_key = getattr(settings, 'BREVO_API_KEY', '')
-        if brevo_key:
-            try:
-                import requests as http_requests
-                sender_email = getattr(settings, 'BREVO_SENDER_EMAIL', 'curaclinic.ua@gmail.com')
-                r = http_requests.post(
-                    'https://api.brevo.com/v3/smtp/email',
-                    headers={'api-key': brevo_key, 'Content-Type': 'application/json'},
-                    json={
-                        'sender': {'name': 'CURA Clinic', 'email': sender_email},
-                        'to': [{'email': email}],
-                        'subject': subject,
-                        'htmlContent': html_message,
-                    },
-                    timeout=5
-                )
-                if r.status_code in (200, 201):
-                    email_sent = True
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(f"Brevo email API error: {e}")
-
-        resend_key = getattr(settings, 'RESEND_API_KEY', '')
-        if not email_sent and resend_key:
-            try:
-                import requests as http_requests
-                r = http_requests.post(
-                    'https://api.resend.com/emails',
-                    headers={'Authorization': f'Bearer {resend_key}', 'Content-Type': 'application/json'},
-                    json={
-                        'from': 'CURA Clinic <onboarding@resend.dev>',
-                        'to': [email],
-                        'subject': subject,
-                        'html': html_message,
-                    },
-                    timeout=5
-                )
-                if r.status_code in (200, 201):
-                    email_sent = True
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(f"Resend email API error: {e}")
-
-        if not email_sent:
-            try:
-                send_mail(
-                    subject,
-                    message,
-                    settings.DEFAULT_FROM_EMAIL,
-                    [email],
-                    fail_silently=False,
-                    html_message=html_message
-                )
-                email_sent = True
-            except Exception as mail_err:
-                import logging
-                logging.getLogger(__name__).warning(f"SMTP send failed (Render port block): {mail_err}")
+        if not _send_clinic_email(email, subject, message, html_message):
+            return Response(
+                {'error': 'Failed to send verification code email. Please try again later.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         return Response({'message': 'OTP sent successfully', 'email': email}, status=status.HTTP_200_OK)
 
@@ -564,9 +569,12 @@ class VerifyOTPView(APIView):
                 'claimed': bool(user),
             }
 
+            # Mark verified (single-use for VerifyOTPView since query requires is_verified=False;
+            # preserved until SetPasswordView consumes it for Forgot Password / Account Claim)
+            verification.is_verified = True
+            verification.save(update_fields=['is_verified'])
+
             if user:
-                # Single-use OTP: consume immediately when minting login tokens
-                verification.delete()
                 refresh, _ = mint_tokens_for_user(user)
                 res_payload.update({
                     'refresh': str(refresh),
@@ -578,9 +586,6 @@ class VerifyOTPView(APIView):
                         'is_new': False,
                     }
                 })
-            else:
-                verification.is_verified = True
-                verification.save()
 
             return Response(res_payload)
         except OTPVerification.DoesNotExist:
@@ -864,14 +869,14 @@ class ChangePasswordView(APIView):
         user.save()
 
         payload = {'success': True, 'message': 'Password updated successfully.'}
-        if not staff_account:
-            return Response(payload, status=status.HTTP_200_OK)
-
-        refresh, _ = mint_tokens_for_user(user)
-        payload['access'] = str(refresh.access_token)
-        response = Response(payload, status=status.HTTP_200_OK)
-        set_refresh_cookie(response, str(refresh))
-        return response
+        if isinstance(user, User) and (staff_account or is_self_authenticated or current_password):
+            refresh, _ = mint_tokens_for_user(user)
+            payload['access'] = str(refresh.access_token)
+            response = Response(payload, status=status.HTTP_200_OK)
+            if staff_account:
+                set_refresh_cookie(response, str(refresh))
+            return response
+        return Response(payload, status=status.HTTP_200_OK)
 
 class DeleteAccountView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1496,11 +1501,29 @@ def _availability_response(model_cls, request):
             'is_locked': not unlocked,
         })
 
+    req_model = TelemedicineRequest if model_cls is TelemedicineAvailability else AppointmentRequest
+    try:
+        booked_slots = [
+            {
+                'preferred_date': str(r.preferred_date) if r.preferred_date else '',
+                'preferred_time': r.preferred_time or '',
+                'scheduled_date': str(r.scheduled_date) if r.scheduled_date else '',
+                'scheduled_time': r.scheduled_time or '',
+                'status': r.status or '',
+            }
+            for r in req_model.objects.exclude(status__in=['Rejected', 'Completed', 'Cancelled']).only(
+                'preferred_date', 'preferred_time', 'scheduled_date', 'scheduled_time', 'status'
+            )
+        ]
+    except Exception:
+        booked_slots = []
+
     clean_times = [t for t in raw_times if t != _FEATURE_UNLOCKED_MARKER]
     return Response({
         'unavailable_dates': dates,
         'unavailable_times': clean_times,
         'is_locked': not unlocked,
+        'booked_slots': booked_slots,
     })
 
 
@@ -1565,13 +1588,11 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
                 
             telemed_request.save()
             
-            # Simulated Email Sending
-            print("\n=== MOCK EMAIL SENT ===")
-            print(f"To: {telemed_request.patient.email}")
-            print(f"Subject: Telemedicine Consultation Approved")
-            print(f"Your consultation is approved for {scheduled_date} at {scheduled_time}.")
-            print(f"Meeting Link: {meeting_link}")
-            print("=======================\n")
+            _send_clinic_email(
+                getattr(telemed_request.patient, 'email', ''),
+                'Telemedicine Consultation Approved',
+                f"Your telemedicine consultation is approved for {scheduled_date} at {scheduled_time}. Meeting Link: {meeting_link}",
+            )
             from .models import AppNotification
             AppNotification.objects.create(
                 type='telemedicine_update',
@@ -1582,11 +1603,11 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
             
         elif status == 'Rejected':
             telemed_request.save()
-            print("\n=== MOCK EMAIL SENT ===")
-            print(f"To: {telemed_request.patient.email}")
-            print(f"Subject: Telemedicine Consultation Update")
-            print(f"Your consultation request has been rejected. Please contact the clinic for more details.")
-            print("=======================\n")
+            _send_clinic_email(
+                getattr(telemed_request.patient, 'email', ''),
+                'Telemedicine Consultation Update',
+                'Your telemedicine consultation request has been rejected. Please contact the clinic for more details.',
+            )
             from .models import AppNotification
             AppNotification.objects.create(
                 type='telemedicine_update',
@@ -1657,11 +1678,11 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
                 
             appointment.save()
             
-            print("\n=== MOCK EMAIL SENT ===")
-            print(f"To: {appointment.patient.email}")
-            print(f"Subject: In-Person Appointment Approved")
-            print(f"Your appointment is approved for {scheduled_date} at {scheduled_time}.")
-            print("=======================\n")
+            _send_clinic_email(
+                getattr(appointment.patient, 'email', ''),
+                'In-Person Appointment Approved',
+                f"Your appointment is approved for {scheduled_date} at {scheduled_time}.",
+            )
             from .models import AppNotification
             AppNotification.objects.create(
                 type='appointment_update',
@@ -1672,11 +1693,11 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
             
         elif status == 'Rejected':
             appointment.save()
-            print("\n=== MOCK EMAIL SENT ===")
-            print(f"To: {appointment.patient.email}")
-            print(f"Subject: Appointment Update")
-            print(f"Your appointment request has been rejected. Please contact the clinic for more details.")
-            print("=======================\n")
+            _send_clinic_email(
+                getattr(appointment.patient, 'email', ''),
+                'Appointment Update',
+                'Your appointment request has been rejected. Please contact the clinic for more details.',
+            )
             from .models import AppNotification
             AppNotification.objects.create(
                 type='appointment_update',

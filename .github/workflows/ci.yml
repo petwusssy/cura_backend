@@ -17,5 +17,7 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Run Django tests
-        run: python -B manage.py test api.tests -v 2
+      - name: Run migrations and Django tests
+        run: |
+          python -B manage.py migrate --noinput
+          python -B manage.py test api.tests -v 2

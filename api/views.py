@@ -1237,6 +1237,33 @@ class TreatmentViewSet(viewsets.ModelViewSet):
     serializer_class = TreatmentSerializer
     # permission_classes = [IsAuthenticated]
 
+def _apply_medicine_stock_delta(med, qty, tx_type, note):
+    if tx_type == 'add':
+        med.stock = max(0, (med.stock or 0)) + qty
+        if med.beginningQty is None:
+            med.beginningQty = med.stock
+    else:
+        actual_dispensed = min(max(0, med.stock or 0), qty)
+        med.stock = max(0, (med.stock or 0)) - qty
+        med.dispensed = (med.dispensed or 0) + (actual_dispensed if actual_dispensed > 0 else qty)
+
+    threshold = med.threshold if med.threshold is not None else 15
+    if med.stock <= 0:
+        med.status = 'Out of Stock'
+    elif med.stock <= threshold:
+        med.status = 'Low Stock'
+    else:
+        med.status = 'Normal'
+
+    med.save()
+    StockHistory.objects.create(
+        medicine=med,
+        qty=qty,
+        type=tx_type,
+        note=note or ('Stock added' if tx_type == 'add' else 'Dispensed'),
+    )
+
+
 class MedicineItemViewSet(viewsets.ModelViewSet):
     queryset = MedicineItem.objects.prefetch_related('stockHistory').all()
     serializer_class = MedicineItemSerializer
@@ -1273,30 +1300,7 @@ class MedicineItemViewSet(viewsets.ModelViewSet):
             except MedicineItem.DoesNotExist:
                 return Response({'error': 'Medicine not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-            if tx_type == 'add':
-                med.stock = max(0, (med.stock or 0)) + qty
-                if med.beginningQty is None:
-                    med.beginningQty = med.stock
-            else:
-                actual_dispensed = min(max(0, med.stock or 0), qty)
-                med.stock = max(0, (med.stock or 0) - qty)
-                med.dispensed = (med.dispensed or 0) + (actual_dispensed if actual_dispensed > 0 else qty)
-
-            threshold = med.threshold if med.threshold is not None else 15
-            if med.stock <= 0:
-                med.status = 'Out of Stock'
-            elif med.stock <= threshold:
-                med.status = 'Low Stock'
-            else:
-                med.status = 'Normal'
-
-            med.save()
-            StockHistory.objects.create(
-                medicine=med,
-                qty=qty,
-                type=tx_type,
-                note=note or ('Stock added' if tx_type == 'add' else 'Dispensed'),
-            )
+            _apply_medicine_stock_delta(med, qty, tx_type, note)
 
         try:
             from .gdrive_service import schedule_mirror
@@ -1315,6 +1319,115 @@ class PurchaseRequestViewSet(viewsets.ModelViewSet):
     queryset = PurchaseRequest.objects.prefetch_related('history').all()
     serializer_class = PurchaseRequestSerializer
     # permission_classes = [IsAuthenticated]
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if (instance.receivedQty or 0) > 0:
+            return Response(
+                {'error': 'Cannot delete a purchase request that already has received deliveries. Archive or keep it for audit history.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().destroy(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'], url_path='receive')
+    def receive(self, request, pk=None):
+        try:
+            qty = int(request.data.get('qty', 0))
+        except (ValueError, TypeError):
+            return Response({'error': 'Valid integer qty is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if qty <= 0:
+            return Response({'error': 'qty must be greater than 0.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        raw_date = (request.data.get('date') or '').strip()
+        rx_date = raw_date or timezone.localdate().isoformat()
+        note = (request.data.get('note') or '').strip()
+
+        med_updated = None
+        with transaction.atomic():
+            try:
+                pr = PurchaseRequest.objects.select_for_update().get(pk=pk)
+            except PurchaseRequest.DoesNotExist:
+                return Response({'error': 'Purchase request not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+            if pr.status == 'Voided':
+                return Response({'error': 'Cannot receive stock for a voided purchase request.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            pr.receivedQty = (pr.receivedQty or 0) + qty
+            pr.status = 'Complete' if pr.receivedQty >= (pr.requestedQty or 0) else 'Partial'
+            pr.save()
+
+            PurchaseHistory.objects.create(
+                request=pr,
+                date=rx_date,
+                qty=qty,
+                note=note or f'Received delivery (+{qty} units)',
+            )
+
+            med_name = (pr.medicine or '').strip()
+            if med_name:
+                med = MedicineItem.objects.select_for_update().filter(name__iexact=med_name).first()
+                if med:
+                    _apply_medicine_stock_delta(med, qty, 'add', f'From PR {pr.prfNo or pr.id}')
+                    med_updated = med
+
+        if med_updated is not None:
+            try:
+                from .gdrive_service import schedule_mirror
+                schedule_mirror('inventory')
+            except Exception:
+                pass
+
+        return Response(
+            {
+                'request': PurchaseRequestSerializer(pr).data,
+                'medicine': MedicineItemSerializer(med_updated).data if med_updated is not None else None,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=['post'], url_path='void-prf')
+    def void_prf(self, request):
+        ids = request.data.get('ids') or []
+        prf_no = (request.data.get('prfNo') or '').strip()
+        reason = (request.data.get('reason') or '').strip()
+        staff_name = (request.data.get('staffName') or '').strip()
+
+        if not isinstance(ids, list) and not prf_no:
+            return Response({'error': 'ids list or prfNo is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            qs = PurchaseRequest.objects.select_for_update()
+            if isinstance(ids, list) and len(ids) > 0:
+                qs = qs.filter(id__in=ids)
+            elif prf_no:
+                qs = qs.filter(prfNo=prf_no)
+            else:
+                return Response({'error': 'No matching purchase requests found.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            items = list(qs)
+            if not items:
+                return Response({'error': 'No matching purchase requests found.'}, status=status.HTTP_404_NOT_FOUND)
+
+            if any((item.receivedQty or 0) > 0 for item in items):
+                return Response(
+                    {'error': 'Cannot void a PRF that already has received deliveries. Keep it as Partial/Complete for inventory audit.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            today_str = timezone.localdate().isoformat()
+            void_note = f"Voided PRF{f' ({reason})' if reason else ''}{f' by {staff_name}' if staff_name else ''}"
+            for item in items:
+                item.status = 'Voided'
+                item.save()
+                PurchaseHistory.objects.create(
+                    request=item,
+                    date=today_str,
+                    qty=0,
+                    note=void_note,
+                )
+
+        refreshed = PurchaseRequest.objects.prefetch_related('history').filter(id__in=[item.id for item in items])
+        return Response(PurchaseRequestSerializer(refreshed, many=True).data, status=status.HTTP_200_OK)
 
 class PurchaseHistoryViewSet(viewsets.ModelViewSet):
     queryset = PurchaseHistory.objects.all()

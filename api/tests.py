@@ -568,6 +568,94 @@ class PrivacySecurityTests(unittest.TestCase):
             ClinicStaff.objects.filter(id=staff.id).delete()
             LoginAttempt.objects.filter(identifier__startswith=STAFF_PIN_SENTINEL).delete()
 
+    def test_purchase_request_atomic_receive_void_and_delete_guard(self):
+        from datetime import date
+        from rest_framework.test import APIRequestFactory
+        from api.models import MedicineItem, PurchaseHistory, PurchaseRequest, StockHistory
+        from api.views import PurchaseRequestViewSet
+
+        factory = APIRequestFactory()
+        med = MedicineItem.objects.create(
+            name='__TEST_PARACETAMOL__',
+            stock=10,
+            threshold=15,
+            status='Low Stock',
+            unit='Tablet',
+        )
+        req_receive = PurchaseRequest.objects.create(
+            medicine='__TEST_PARACETAMOL__',
+            requestedQty=20,
+            receivedQty=0,
+            date=date(2026, 11, 15),
+            status='Pending',
+            prfNo='PRF - 2026 - 999',
+        )
+        req_void = PurchaseRequest.objects.create(
+            medicine='__TEST_PARACETAMOL__',
+            requestedQty=10,
+            receivedQty=0,
+            date=date(2026, 11, 15),
+            status='Pending',
+            prfNo='PRF - 2026 - 998',
+        )
+        try:
+            receive_view = PurchaseRequestViewSet.as_view({'post': 'receive'})
+            delete_view = PurchaseRequestViewSet.as_view({'delete': 'destroy'})
+            void_view = PurchaseRequestViewSet.as_view({'post': 'void_prf'})
+
+            rx_resp = receive_view(
+                factory.post(f'/api/purchase-requests/{req_receive.id}/receive/', {
+                    'qty': 10,
+                    'date': '2026-11-15',
+                    'note': 'First box',
+                }, format='json'),
+                pk=str(req_receive.id),
+            )
+            self.assertEqual(rx_resp.status_code, 200)
+
+            req_receive.refresh_from_db()
+            med.refresh_from_db()
+            self.assertEqual(req_receive.receivedQty, 10)
+            self.assertEqual(req_receive.status, 'Partial')
+            self.assertEqual(med.stock, 20)
+            self.assertEqual(med.status, 'Normal')
+            self.assertEqual(PurchaseHistory.objects.filter(request=req_receive, qty=10).count(), 1)
+            self.assertEqual(StockHistory.objects.filter(medicine=med, type='add', qty=10).count(), 1)
+
+            # Received items cannot be hard-deleted or voided
+            del_resp = delete_view(factory.delete(f'/api/purchase-requests/{req_receive.id}/'), pk=str(req_receive.id))
+            self.assertEqual(del_resp.status_code, 400)
+
+            void_bad = void_view(factory.post('/api/purchase-requests/void-prf/', {
+                'ids': [str(req_receive.id)],
+                'reason': 'Duplicate',
+            }, format='json'))
+            self.assertEqual(void_bad.status_code, 400)
+
+            # Untouched Pending PRF can be voided cleanly while preserving PRF history
+            void_ok = void_view(factory.post('/api/purchase-requests/void-prf/', {
+                'ids': [str(req_void.id)],
+                'prfNo': 'PRF - 2026 - 998',
+                'reason': 'Wrong vendor',
+                'staffName': 'Nurse Joy',
+            }, format='json'))
+            self.assertEqual(void_ok.status_code, 200)
+            req_void.refresh_from_db()
+            self.assertEqual(req_void.status, 'Voided')
+            self.assertTrue(PurchaseHistory.objects.filter(request=req_void, note__icontains='Voided PRF').exists())
+
+            # Voided PRF rejects future deliveries
+            rx_voided = receive_view(
+                factory.post(f'/api/purchase-requests/{req_void.id}/receive/', {'qty': 5}, format='json'),
+                pk=str(req_void.id),
+            )
+            self.assertEqual(rx_voided.status_code, 400)
+        finally:
+            PurchaseHistory.objects.filter(request__in=[req_receive, req_void]).delete()
+            PurchaseRequest.objects.filter(id__in=[req_receive.id, req_void.id]).delete()
+            StockHistory.objects.filter(medicine=med).delete()
+            MedicineItem.objects.filter(id=med.id).delete()
+
 
 
 

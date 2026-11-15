@@ -88,8 +88,11 @@ class Patient(models.Model):
     guardianName = models.CharField(max_length=255, blank=True, null=True)
     gradeLevel = models.CharField(max_length=50, blank=True, null=True)
     avatar = models.TextField(blank=True, null=True)
+    rfidUid = models.CharField(max_length=64, unique=True, blank=True, null=True, db_index=True)
 
     def save(self, *args, **kwargs):
+        if self.rfidUid is not None:
+            self.rfidUid = self.rfidUid.strip() or None
         if self.name:
             self.name = self.name.strip().upper()
         if self.guardianName:

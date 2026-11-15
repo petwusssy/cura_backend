@@ -12,6 +12,7 @@ class PatientSerializer(serializers.ModelSerializer):
     contact = serializers.CharField(required=False, allow_blank=True, default='Not Provided')
     birthday = serializers.DateField(required=False, allow_null=True, default='2000-01-01')
     age = serializers.IntegerField(required=False, default=0)
+    rfidUid = serializers.CharField(required=False, allow_blank=True, allow_null=True, default=None)
 
     class Meta:
         model = Patient
@@ -35,6 +36,13 @@ class PatientSerializer(serializers.ModelSerializer):
 
     def validate_name(self, value):
         return value.strip().upper() if value else value
+
+    def validate_rfidUid(self, value):
+        clean = value.strip() if value else None
+        if clean:
+            instance_id = self.instance.id if self.instance else None
+            Patient.objects.filter(rfidUid__iexact=clean).exclude(id=instance_id).update(rfidUid=None)
+        return clean or None
 
 class TreatmentSerializer(serializers.ModelSerializer):
     class Meta:

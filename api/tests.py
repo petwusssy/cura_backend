@@ -323,23 +323,27 @@ class PrivacySecurityTests(unittest.TestCase):
 
     def test_verify_admin_rate_limits_after_five_failures(self):
         from rest_framework.test import APIRequestFactory
+        from api.models import LoginAttempt
         from api.views import ClinicStaffViewSet
 
+        LoginAttempt.objects.filter(identifier='__cura_user_mgmt__:10.0.0.9').delete()
         factory = APIRequestFactory()
         view = ClinicStaffViewSet.as_view({'post': 'verify_admin'})
+        try:
+            for expected_remaining in (4, 3, 2, 1):
+                req = factory.post('/api/staff/verify-admin/', {'password': 'wrong'}, format='json', REMOTE_ADDR='10.0.0.9')
+                resp = view(req)
+                self.assertEqual(resp.status_code, 401)
+                self.assertEqual(resp.data['attempts_remaining'], expected_remaining)
+                self.assertFalse(resp.data['is_locked'])
 
-        for expected_remaining in (4, 3, 2, 1):
-            req = factory.post('/api/staff/verify-admin/', {'password': 'wrong'}, format='json', REMOTE_ADDR='10.0.0.9')
-            resp = view(req)
-            self.assertEqual(resp.status_code, 401)
-            self.assertEqual(resp.data['attempts_remaining'], expected_remaining)
-            self.assertFalse(resp.data['is_locked'])
-
-        req_5 = factory.post('/api/staff/verify-admin/', {'password': 'wrong'}, format='json', REMOTE_ADDR='10.0.0.9')
-        resp_5 = view(req_5)
-        self.assertEqual(resp_5.status_code, 429)
-        self.assertTrue(resp_5.data['is_locked'])
-        self.assertEqual(resp_5.data['attempts_remaining'], 0)
+            req_5 = factory.post('/api/staff/verify-admin/', {'password': 'wrong'}, format='json', REMOTE_ADDR='10.0.0.9')
+            resp_5 = view(req_5)
+            self.assertEqual(resp_5.status_code, 429)
+            self.assertTrue(resp_5.data['is_locked'])
+            self.assertEqual(resp_5.data['attempts_remaining'], 0)
+        finally:
+            LoginAttempt.objects.filter(identifier='__cura_user_mgmt__:10.0.0.9').delete()
 
     def test_staff_password_change_requires_master_key_and_invalidates_old_tokens(self):
         import os
@@ -355,64 +359,117 @@ class PrivacySecurityTests(unittest.TestCase):
         )
         from api.views import ChangePasswordView, CustomTokenRefreshView
 
+        User.objects.filter(username='__test_staff_pwd__').delete()
         staff_user = User.objects.create_user(
-            username='anthropeak2026',
-            email='clinic@ua.edu.ph',
+            username='__test_staff_pwd__',
+            email='stafftest@ua.edu.ph',
             password='OldClinicPass!123',
             is_staff=True,
         )
-        old_refresh, _ = mint_tokens_for_user(staff_user)
-        old_access_str = str(old_refresh.access_token)
-        old_refresh_str = str(old_refresh)
+        try:
+            old_refresh, _ = mint_tokens_for_user(staff_user)
+            old_access_str = str(old_refresh.access_token)
+            old_refresh_str = str(old_refresh)
 
-        jwt_auth = VerifiedJWTAuthentication()
-        self.assertEqual(jwt_auth.get_user(AccessToken(old_access_str)).pk, staff_user.pk)
-        self.assertTrue(verify_refresh_token_signature(old_refresh_str))
+            jwt_auth = VerifiedJWTAuthentication()
+            self.assertEqual(jwt_auth.get_user(AccessToken(old_access_str)).pk, staff_user.pk)
+            self.assertTrue(verify_refresh_token_signature(old_refresh_str))
+
+            factory = APIRequestFactory()
+            change_view = ChangePasswordView.as_view()
+
+            with patch.dict(os.environ, {'USER_MANAGEMENT_PASSWORD': 'MasterKey999!'}, clear=False):
+                # Missing or wrong Master Key must return 403 even if authenticated as self
+                bad_req = factory.post('/api/auth/change-password/', {
+                    'email': '__test_staff_pwd__',
+                    'current_password': 'OldClinicPass!123',
+                    'new_password': 'NewClinicPass!456',
+                    'admin_password': 'wrong-master-key',
+                }, format='json')
+                force_authenticate(bad_req, user=staff_user)
+                bad_resp = change_view(bad_req)
+                self.assertEqual(bad_resp.status_code, 403)
+                staff_user.refresh_from_db()
+                self.assertTrue(staff_user.check_password('OldClinicPass!123'))
+
+                # Valid current password + valid Master Key succeeds and mints fresh tokens
+                ok_req = factory.post('/api/auth/change-password/', {
+                    'email': '__test_staff_pwd__',
+                    'current_password': 'OldClinicPass!123',
+                    'new_password': 'NewClinicPass!456',
+                    'admin_password': 'MasterKey999!',
+                }, format='json')
+                force_authenticate(ok_req, user=staff_user)
+                ok_resp = change_view(ok_req)
+                self.assertEqual(ok_resp.status_code, 200)
+                self.assertIn('access', ok_resp.data)
+
+            staff_user.refresh_from_db()
+            self.assertTrue(staff_user.check_password('NewClinicPass!456'))
+
+            # Old access and refresh tokens (on other clinic PCs) are immediately rejected
+            with self.assertRaises(AuthenticationFailed):
+                jwt_auth.get_user(AccessToken(old_access_str))
+            self.assertFalse(verify_refresh_token_signature(old_refresh_str))
+
+            refresh_req = factory.post('/api/auth/refresh/', {'refresh': old_refresh_str}, format='json')
+            refresh_resp = CustomTokenRefreshView.as_view()(refresh_req)
+            self.assertEqual(refresh_resp.status_code, 401)
+
+            # Head Nurse's rotated access token remains valid
+            new_user = jwt_auth.get_user(AccessToken(ok_resp.data['access']))
+            self.assertEqual(new_user.pk, staff_user.pk)
+        finally:
+            User.objects.filter(username='__test_staff_pwd__').delete()
+
+    def test_telemedicine_and_appointments_default_locked_and_toggleable(self):
+        from rest_framework.test import APIRequestFactory
+        from api.models import AppointmentAvailability, TelemedicineAvailability
+        from api.views import AppointmentRequestViewSet, TelemedicineRequestViewSet
 
         factory = APIRequestFactory()
-        change_view = ChangePasswordView.as_view()
+        for url, vs, avail_cls in (
+            ('/api/telemedicine/', TelemedicineRequestViewSet, TelemedicineAvailability),
+            ('/api/appointments/', AppointmentRequestViewSet, AppointmentAvailability),
+        ):
+            existing = avail_cls.objects.first()
+            snapshot = (existing.unavailable_dates, existing.unavailable_times) if existing else None
+            avail_cls.objects.all().delete()
+            try:
+                avail_view = vs.as_view({'get': 'availability', 'post': 'availability'})
+                create_view = vs.as_view({'post': 'create'})
 
-        with patch.dict(os.environ, {'USER_MANAGEMENT_PASSWORD': 'MasterKey999!'}, clear=False):
-            # Missing or wrong Master Key must return 403 even if authenticated as self
-            bad_req = factory.post('/api/auth/change-password/', {
-                'email': 'anthropeak2026',
-                'current_password': 'OldClinicPass!123',
-                'new_password': 'NewClinicPass!456',
-                'admin_password': 'wrong-master-key',
-            }, format='json')
-            force_authenticate(bad_req, user=staff_user)
-            bad_resp = change_view(bad_req)
-            self.assertEqual(bad_resp.status_code, 403)
-            staff_user.refresh_from_db()
-            self.assertTrue(staff_user.check_password('OldClinicPass!123'))
+                # Locked by default on fresh deploy
+                get_resp = avail_view(factory.get(f'{url}availability/'))
+                self.assertEqual(get_resp.status_code, 200)
+                self.assertTrue(get_resp.data['is_locked'])
+                self.assertEqual(get_resp.data['unavailable_times'], [])
 
-            # Valid current password + valid Master Key succeeds and mints fresh tokens
-            ok_req = factory.post('/api/auth/change-password/', {
-                'email': 'anthropeak2026',
-                'current_password': 'OldClinicPass!123',
-                'new_password': 'NewClinicPass!456',
-                'admin_password': 'MasterKey999!',
-            }, format='json')
-            force_authenticate(ok_req, user=staff_user)
-            ok_resp = change_view(ok_req)
-            self.assertEqual(ok_resp.status_code, 200)
-            self.assertIn('access', ok_resp.data)
+                # Direct booking rejected while locked
+                blocked_create = create_view(factory.post(url, {'patient': 'STU-1'}, format='json'))
+                self.assertEqual(blocked_create.status_code, 403)
 
-        staff_user.refresh_from_db()
-        self.assertTrue(staff_user.check_password('NewClinicPass!456'))
+                # Save blocked dates/times preserves lock state
+                save_dates = avail_view(factory.post(f'{url}availability/', {
+                    'unavailable_dates': ['2026-12-01'],
+                    'unavailable_times': ['8:00 AM - 9:00 AM'],
+                }, format='json'))
+                self.assertTrue(save_dates.data['is_locked'])
 
-        # Old access and refresh tokens (on other clinic PCs) are immediately rejected
-        with self.assertRaises(AuthenticationFailed):
-            jwt_auth.get_user(AccessToken(old_access_str))
-        self.assertFalse(verify_refresh_token_signature(old_refresh_str))
+                # Unlocking preserves saved unavailable_dates/times and hides sentinel
+                unlock_resp = avail_view(factory.post(f'{url}availability/', {'is_locked': False}, format='json'))
+                self.assertFalse(unlock_resp.data['is_locked'])
+                self.assertEqual(unlock_resp.data['unavailable_dates'], ['2026-12-01'])
+                self.assertEqual(unlock_resp.data['unavailable_times'], ['8:00 AM - 9:00 AM'])
 
-        refresh_req = factory.post('/api/auth/refresh/', {'refresh': old_refresh_str}, format='json')
-        refresh_resp = CustomTokenRefreshView.as_view()(refresh_req)
-        self.assertEqual(refresh_resp.status_code, 401)
-
-        # Head Nurse's rotated access token remains valid
-        new_user = jwt_auth.get_user(AccessToken(ok_resp.data['access']))
-        self.assertEqual(new_user.pk, staff_user.pk)
+                # Re-locking works cleanly
+                lock_resp = avail_view(factory.post(f'{url}availability/', {'is_locked': True}, format='json'))
+                self.assertTrue(lock_resp.data['is_locked'])
+                self.assertEqual(lock_resp.data['unavailable_times'], ['8:00 AM - 9:00 AM'])
+            finally:
+                avail_cls.objects.all().delete()
+                if snapshot is not None:
+                    avail_cls.objects.create(unavailable_dates=snapshot[0], unavailable_times=snapshot[1])
 
 
 

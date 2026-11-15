@@ -1433,8 +1433,76 @@ class AppNotificationViewSet(viewsets.ModelViewSet):
         deleted_count, _ = qs.delete()
         return Response({'status': 'all notifications cleared', 'deleted': deleted_count})
 
-from .models import TelemedicineRequest
+from .models import TelemedicineRequest, TelemedicineAvailability, AppointmentAvailability
 from .serializers import TelemedicineRequestSerializer
+
+_FEATURE_UNLOCKED_MARKER = '__FEATURE_UNLOCKED__'
+
+
+def _load_json_list(raw):
+    import json
+    try:
+        val = json.loads(raw) if raw else []
+        return val if isinstance(val, list) else []
+    except Exception:
+        return []
+
+
+def _is_feature_locked(model_cls) -> bool:
+    try:
+        record = model_cls.objects.first()
+    except Exception:
+        return True
+    if not record:
+        return True
+    return _FEATURE_UNLOCKED_MARKER not in _load_json_list(getattr(record, 'unavailable_times', '[]'))
+
+
+def _availability_response(model_cls, request):
+    import json
+    try:
+        record = model_cls.objects.first()
+        if not record:
+            record = model_cls.objects.create(unavailable_dates='[]', unavailable_times='[]')
+    except Exception:
+        return Response({'unavailable_dates': [], 'unavailable_times': [], 'is_locked': True})
+
+    dates = _load_json_list(record.unavailable_dates)
+    raw_times = _load_json_list(getattr(record, 'unavailable_times', '[]'))
+    unlocked = _FEATURE_UNLOCKED_MARKER in raw_times
+
+    if request.method == 'POST':
+        if 'unavailable_dates' in request.data:
+            incoming_dates = request.data.get('unavailable_dates', [])
+            dates = incoming_dates if isinstance(incoming_dates, list) else []
+            record.unavailable_dates = json.dumps(dates)
+
+        if 'is_locked' in request.data:
+            raw_lock = request.data.get('is_locked')
+            locked = raw_lock if isinstance(raw_lock, bool) else str(raw_lock).strip().lower() in ('true', '1', 'yes')
+            unlocked = not locked
+
+        base_times = (
+            [t for t in (request.data.get('unavailable_times') or []) if t != _FEATURE_UNLOCKED_MARKER]
+            if 'unavailable_times' in request.data and isinstance(request.data.get('unavailable_times'), list)
+            else [t for t in raw_times if t != _FEATURE_UNLOCKED_MARKER]
+        )
+        record.unavailable_times = json.dumps(base_times + ([_FEATURE_UNLOCKED_MARKER] if unlocked else []))
+        record.save()
+        return Response({
+            'status': 'success',
+            'unavailable_dates': dates,
+            'unavailable_times': base_times,
+            'is_locked': not unlocked,
+        })
+
+    clean_times = [t for t in raw_times if t != _FEATURE_UNLOCKED_MARKER]
+    return Response({
+        'unavailable_dates': dates,
+        'unavailable_times': clean_times,
+        'is_locked': not unlocked,
+    })
+
 
 class TelemedicineRequestViewSet(viewsets.ModelViewSet):
     queryset = TelemedicineRequest.objects.select_related('patient').all().order_by('-created_at')
@@ -1449,6 +1517,11 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
         return qs
 
     def create(self, request, *args, **kwargs):
+        if _is_feature_locked(TelemedicineAvailability):
+            return Response(
+                {'error': 'Telemedicine is currently locked (Coming Soon).'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         response = super().create(request, *args, **kwargs)
         if response.status_code == 201:
             from .models import AppNotification, Patient
@@ -1527,37 +1600,7 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get', 'post'], permission_classes=[])
     def availability(self, request):
-        import json
-        from .models import TelemedicineAvailability
-        try:
-            record = TelemedicineAvailability.objects.first()
-            if not record:
-                record = TelemedicineAvailability.objects.create(unavailable_dates='[]', unavailable_times='[]')
-        except Exception:
-            return Response({'unavailable_dates': [], 'unavailable_times': []})
-
-        if request.method == 'POST':
-            dates = request.data.get('unavailable_dates', [])
-            times = request.data.get('unavailable_times', [])
-            if not isinstance(dates, list):
-                dates = []
-            if not isinstance(times, list):
-                times = []
-            record.unavailable_dates = json.dumps(dates)
-            if hasattr(record, 'unavailable_times'):
-                record.unavailable_times = json.dumps(times)
-            record.save()
-            return Response({'status': 'success', 'unavailable_dates': dates, 'unavailable_times': times})
-
-        try:
-            dates = json.loads(record.unavailable_dates) if record.unavailable_dates else []
-        except Exception:
-            dates = []
-        try:
-            times = json.loads(record.unavailable_times) if hasattr(record, 'unavailable_times') and record.unavailable_times else []
-        except Exception:
-            times = []
-        return Response({'unavailable_dates': dates, 'unavailable_times': times})
+        return _availability_response(TelemedicineAvailability, request)
 
 
 
@@ -1577,6 +1620,11 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
         return qs
 
     def create(self, request, *args, **kwargs):
+        if _is_feature_locked(AppointmentAvailability):
+            return Response(
+                {'error': 'Appointments are currently locked (Coming Soon).'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         response = super().create(request, *args, **kwargs)
         if response.status_code == 201:
             from .models import AppNotification, Patient
@@ -1642,37 +1690,7 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get', 'post'], permission_classes=[])
     def availability(self, request):
-        import json
-        from .models import AppointmentAvailability
-        try:
-            record = AppointmentAvailability.objects.first()
-            if not record:
-                record = AppointmentAvailability.objects.create(unavailable_dates='[]', unavailable_times='[]')
-        except Exception:
-            return Response({'unavailable_dates': [], 'unavailable_times': []})
-
-        if request.method == 'POST':
-            dates = request.data.get('unavailable_dates', [])
-            times = request.data.get('unavailable_times', [])
-            if not isinstance(dates, list):
-                dates = []
-            if not isinstance(times, list):
-                times = []
-            record.unavailable_dates = json.dumps(dates)
-            if hasattr(record, 'unavailable_times'):
-                record.unavailable_times = json.dumps(times)
-            record.save()
-            return Response({'status': 'success', 'unavailable_dates': dates, 'unavailable_times': times})
-
-        try:
-            dates = json.loads(record.unavailable_dates) if record.unavailable_dates else []
-        except Exception:
-            dates = []
-        try:
-            times = json.loads(record.unavailable_times) if hasattr(record, 'unavailable_times') and record.unavailable_times else []
-        except Exception:
-            times = []
-        return Response({'unavailable_dates': dates, 'unavailable_times': times})
+        return _availability_response(AppointmentAvailability, request)
 
 
 

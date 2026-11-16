@@ -530,6 +530,7 @@ class ClinicStaff(models.Model):
     role = models.CharField(max_length=80, default='Staff Nurse')
     pin_hash = models.CharField(max_length=255)
     is_active = models.BooleanField(default=True)
+    allowed_pages = models.JSONField(default=None, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

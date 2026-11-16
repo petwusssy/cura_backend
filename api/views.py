@@ -2199,6 +2199,7 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
                         'id': str(staff_member.id),
                         'name': staff_member.name,
                         'role': staff_member.role,
+                        'allowed_pages': staff_member.allowed_pages,
                     }
                 })
 

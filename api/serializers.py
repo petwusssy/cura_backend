@@ -299,7 +299,7 @@ class ClinicStaffSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ClinicStaff
-        fields = ['id', 'name', 'role', 'pin', 'is_active', 'created_at']
+        fields = ['id', 'name', 'role', 'pin', 'is_active', 'allowed_pages', 'created_at']
         read_only_fields = ['id', 'created_at']
 
     def validate_pin(self, value):

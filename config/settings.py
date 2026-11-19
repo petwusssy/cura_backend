@@ -96,7 +96,11 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
+REQUIRE_PRIMARY_DB = config('REQUIRE_PRIMARY_DB', default=False, cast=bool)
+
+
 def _parse_database_url(url):
+    import sys
     sqlite_fallback = dj_database_url.parse(f"sqlite:///{BASE_DIR / 'db.sqlite3'}")
     if not url or str(url).startswith('sqlite'):
         return sqlite_fallback
@@ -105,7 +109,7 @@ def _parse_database_url(url):
     if parsed and not parsed.get('NAME'):
         parsed['NAME'] = 'postgres'
 
-    # Verify PostgreSQL reachability so Render builds/boots never crash when Supabase Free Tier is paused
+    # Verify PostgreSQL reachability so Render staging builds never crash when Supabase Free Tier is paused
     if parsed and 'postgresql' in parsed.get('ENGINE', ''):
         try:
             import psycopg2
@@ -119,6 +123,9 @@ def _parse_database_url(url):
             )
             conn.close()
         except Exception as exc:
+            is_mgmt_cmd = any(cmd in arg.lower() for arg in sys.argv for cmd in ('collectstatic', 'makemigrations', 'migrate', 'test'))
+            if REQUIRE_PRIMARY_DB and not is_mgmt_cmd:
+                raise RuntimeError(f"Primary PostgreSQL DATABASE_URL unreachable: {exc}") from exc
             print(
                 f"[CURA DB WARNING] Primary DATABASE_URL unreachable ({exc}). "
                 "Falling back to SQLite until Supabase project is restored/unpaused."
@@ -219,6 +226,9 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'api.auth_utils.VerifiedJWTAuthentication',
     ),
+    'DEFAULT_PERMISSION_CLASSES': (
+        'rest_framework.permissions.IsAuthenticated',
+    ),
     'DEFAULT_THROTTLE_RATES': {
         'anon': '120/min',
         'user': '600/min',
@@ -246,7 +256,7 @@ BREVO_API_KEY = config('BREVO_API_KEY', default='')
 BREVO_SENDER_EMAIL = config('BREVO_SENDER_EMAIL', default='curaclinic.ua@gmail.com')
 RESEND_API_KEY = config('RESEND_API_KEY', default='')
 EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='curaclinic.ua@gmail.com')
-EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='euueyvclnpbjjfpi')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='CURA Clinic <curaclinic.ua@gmail.com>')
 
 

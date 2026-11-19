@@ -323,8 +323,11 @@ class PrivacySecurityTests(unittest.TestCase):
         )
 
         factory = APIRequestFactory()
+        staff_user = MagicMock(is_authenticated=True, is_staff=True, is_superuser=False, pk=999, username='__staff__')
         # Individual DELETE removes row permanently
         del_req = factory.delete(f'/api/notifications/{web_notif.id}/')
+        from rest_framework.test import force_authenticate
+        force_authenticate(del_req, user=staff_user)
         del_view = AppNotificationViewSet.as_view({'delete': 'destroy'})
         del_resp = del_view(del_req, pk=str(web_notif.id))
         self.assertEqual(del_resp.status_code, 204)
@@ -337,12 +340,15 @@ class PrivacySecurityTests(unittest.TestCase):
             patientName='JUAN',
         )
         clear_req = factory.post('/api/notifications/clear_all/?audience=web')
+        force_authenticate(clear_req, user=staff_user)
         clear_view = AppNotificationViewSet.as_view({'post': 'clear_all'})
         clear_resp = clear_view(clear_req)
         self.assertEqual(clear_resp.status_code, 200)
         self.assertFalse(AppNotification.objects.filter(pk=web_notif_2.id).exists())
         self.assertTrue(AppNotification.objects.filter(pk=patient_turn.id).exists())
         self.assertTrue(AppNotification.objects.filter(pk=patient_update.id).exists())
+        patient_turn.delete()
+        patient_update.delete()
 
     def test_verify_admin_rate_limits_after_five_failures(self):
         from rest_framework.test import APIRequestFactory
@@ -446,11 +452,17 @@ class PrivacySecurityTests(unittest.TestCase):
             User.objects.filter(username='__test_staff_pwd__').delete()
 
     def test_telemedicine_and_appointments_default_locked_and_toggleable(self):
-        from rest_framework.test import APIRequestFactory
+        from rest_framework.test import APIRequestFactory, force_authenticate
         from api.models import AppointmentAvailability, TelemedicineAvailability
         from api.views import AppointmentRequestViewSet, TelemedicineRequestViewSet
 
         factory = APIRequestFactory()
+        staff_user = MagicMock(is_authenticated=True, is_staff=True, is_superuser=False, pk=999, username='__staff__')
+        def _staff_post(path, payload):
+            req = factory.post(path, payload, format='json')
+            force_authenticate(req, user=staff_user)
+            return req
+
         for url, vs, avail_cls in (
             ('/api/telemedicine/', TelemedicineRequestViewSet, TelemedicineAvailability),
             ('/api/appointments/', AppointmentRequestViewSet, AppointmentAvailability),
@@ -469,24 +481,24 @@ class PrivacySecurityTests(unittest.TestCase):
                 self.assertEqual(get_resp.data['unavailable_times'], [])
 
                 # Direct booking rejected while locked
-                blocked_create = create_view(factory.post(url, {'patient': 'STU-1'}, format='json'))
+                blocked_create = create_view(_staff_post(url, {'patient': 'STU-1'}))
                 self.assertEqual(blocked_create.status_code, 403)
 
                 # Save blocked dates/times preserves lock state
-                save_dates = avail_view(factory.post(f'{url}availability/', {
+                save_dates = avail_view(_staff_post(f'{url}availability/', {
                     'unavailable_dates': ['2026-12-01'],
                     'unavailable_times': ['8:00 AM - 9:00 AM'],
-                }, format='json'))
+                }))
                 self.assertTrue(save_dates.data['is_locked'])
 
                 # Unlocking preserves saved unavailable_dates/times and hides sentinel
-                unlock_resp = avail_view(factory.post(f'{url}availability/', {'is_locked': False}, format='json'))
+                unlock_resp = avail_view(_staff_post(f'{url}availability/', {'is_locked': False}))
                 self.assertFalse(unlock_resp.data['is_locked'])
                 self.assertEqual(unlock_resp.data['unavailable_dates'], ['2026-12-01'])
                 self.assertEqual(unlock_resp.data['unavailable_times'], ['8:00 AM - 9:00 AM'])
 
                 # Re-locking works cleanly
-                lock_resp = avail_view(factory.post(f'{url}availability/', {'is_locked': True}, format='json'))
+                lock_resp = avail_view(_staff_post(f'{url}availability/', {'is_locked': True}))
                 self.assertTrue(lock_resp.data['is_locked'])
                 self.assertEqual(lock_resp.data['unavailable_times'], ['8:00 AM - 9:00 AM'])
                 self.assertIn('booked_slots', get_resp.data)
@@ -570,11 +582,15 @@ class PrivacySecurityTests(unittest.TestCase):
 
     def test_purchase_request_atomic_receive_void_and_delete_guard(self):
         from datetime import date
-        from rest_framework.test import APIRequestFactory
+        from rest_framework.test import APIRequestFactory, force_authenticate
         from api.models import MedicineItem, PurchaseHistory, PurchaseRequest, StockHistory
         from api.views import PurchaseRequestViewSet
 
         factory = APIRequestFactory()
+        staff_user = MagicMock(is_authenticated=True, is_staff=True, is_superuser=False, pk=999, username='__staff__')
+        def _staff_req(req):
+            force_authenticate(req, user=staff_user)
+            return req
         med = MedicineItem.objects.create(
             name='__TEST_PARACETAMOL__',
             stock=10,
@@ -604,11 +620,11 @@ class PrivacySecurityTests(unittest.TestCase):
             void_view = PurchaseRequestViewSet.as_view({'post': 'void_prf'})
 
             rx_resp = receive_view(
-                factory.post(f'/api/purchase-requests/{req_receive.id}/receive/', {
+                _staff_req(factory.post(f'/api/purchase-requests/{req_receive.id}/receive/', {
                     'qty': 10,
                     'date': '2026-11-15',
                     'note': 'First box',
-                }, format='json'),
+                }, format='json')),
                 pk=str(req_receive.id),
             )
             self.assertEqual(rx_resp.status_code, 200)
@@ -623,22 +639,22 @@ class PrivacySecurityTests(unittest.TestCase):
             self.assertEqual(StockHistory.objects.filter(medicine=med, type='add', qty=10).count(), 1)
 
             # Received items cannot be hard-deleted or voided
-            del_resp = delete_view(factory.delete(f'/api/purchase-requests/{req_receive.id}/'), pk=str(req_receive.id))
+            del_resp = delete_view(_staff_req(factory.delete(f'/api/purchase-requests/{req_receive.id}/')), pk=str(req_receive.id))
             self.assertEqual(del_resp.status_code, 400)
 
-            void_bad = void_view(factory.post('/api/purchase-requests/void-prf/', {
+            void_bad = void_view(_staff_req(factory.post('/api/purchase-requests/void-prf/', {
                 'ids': [str(req_receive.id)],
                 'reason': 'Duplicate',
-            }, format='json'))
+            }, format='json')))
             self.assertEqual(void_bad.status_code, 400)
 
             # Untouched Pending PRF can be voided cleanly while preserving PRF history
-            void_ok = void_view(factory.post('/api/purchase-requests/void-prf/', {
+            void_ok = void_view(_staff_req(factory.post('/api/purchase-requests/void-prf/', {
                 'ids': [str(req_void.id)],
                 'prfNo': 'PRF - 2026 - 998',
                 'reason': 'Wrong vendor',
                 'staffName': 'Nurse Joy',
-            }, format='json'))
+            }, format='json')))
             self.assertEqual(void_ok.status_code, 200)
             req_void.refresh_from_db()
             self.assertEqual(req_void.status, 'Voided')
@@ -646,7 +662,7 @@ class PrivacySecurityTests(unittest.TestCase):
 
             # Voided PRF rejects future deliveries
             rx_voided = receive_view(
-                factory.post(f'/api/purchase-requests/{req_void.id}/receive/', {'qty': 5}, format='json'),
+                _staff_req(factory.post(f'/api/purchase-requests/{req_void.id}/receive/', {'qty': 5}, format='json')),
                 pk=str(req_void.id),
             )
             self.assertEqual(rx_voided.status_code, 400)
@@ -660,11 +676,12 @@ class PrivacySecurityTests(unittest.TestCase):
         import uuid
         from datetime import date
         from django.db import connection
-        from rest_framework.test import APIRequestFactory
+        from rest_framework.test import APIRequestFactory, force_authenticate
         from api.models import AppNotification, MedicalCertificate, Patient
         from api.views import MedicalCertificateViewSet
 
         factory = APIRequestFactory()
+        staff_user = MagicMock(is_authenticated=True, is_staff=True, is_superuser=False, pk=999, username='__staff__')
         patient = Patient.objects.create(
             id='__TEST_MC_ENC__',
             name='JUAN DELA CRUZ',
@@ -686,7 +703,9 @@ class PrivacySecurityTests(unittest.TestCase):
                 'issuedBy': 'UA CLINIC',
                 'notes': 'Temp 38.5C',
             }
-            resp = create_view(factory.post('/api/certificates/', payload, format='json'))
+            r1 = factory.post('/api/certificates/', payload, format='json')
+            force_authenticate(r1, user=staff_user)
+            resp = create_view(r1)
             self.assertEqual(resp.status_code, 201)
             self.assertEqual(resp.data['diagnosis'], 'Acute Tonsillitis')
             self.assertEqual(resp.data['recommendation'], 'Rest for 2 days')
@@ -695,7 +714,9 @@ class PrivacySecurityTests(unittest.TestCase):
             cert_id = resp.data['id']
 
             # Duplicate check must still match encrypted diagnosis cleanly
-            dup_resp = create_view(factory.post('/api/certificates/', payload, format='json'))
+            r2 = factory.post('/api/certificates/', payload, format='json')
+            force_authenticate(r2, user=staff_user)
+            dup_resp = create_view(r2)
             self.assertEqual(dup_resp.status_code, 200)
             self.assertEqual(dup_resp.data['id'], cert_id)
 
@@ -805,6 +826,77 @@ class PrivacySecurityTests(unittest.TestCase):
             LoginAttempt.objects.filter(identifier__startswith=STAFF_PIN_SENTINEL).delete()
             LoginAttempt.objects.filter(identifier='__test_stale_login__').delete()
             User.objects.filter(id=u.id).delete()
+
+    def test_api_blocks_unauthenticated_and_cross_patient_idor_access(self):
+        from datetime import date
+        from django.contrib.auth.models import User
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from api.models import MedicalCertificate, Patient
+        from api.views import (
+            AuditLogViewSet,
+            MedicalCertificateRequestViewSet,
+            MedicalCertificateViewSet,
+            MedicineItemViewSet,
+            PatientViewSet,
+        )
+
+        factory = APIRequestFactory()
+        User.objects.filter(username__in=['__stu_a__@ua.edu.ph']).delete()
+        stu_a_user = User.objects.create_user(username='__stu_a__@ua.edu.ph', email='__stu_a__@ua.edu.ph', password='Password123!')
+        pat_a = Patient.objects.create(
+            id='__STU_A__', name='STUDENT A', category='Student', contact='09170000001',
+            birthday=date(2005, 1, 1), age=21, email='__stu_a__@ua.edu.ph',
+        )
+        pat_b = Patient.objects.create(
+            id='__STU_B__', name='STUDENT B', category='Student', contact='09170000002',
+            birthday=date(2005, 2, 2), age=21, email='__stu_b__@ua.edu.ph',
+        )
+        cert_a = MedicalCertificate.objects.create(patient=pat_a, date=date(2026, 11, 15), purpose='Excuse A', diagnosis='Cold')
+        cert_b = MedicalCertificate.objects.create(patient=pat_b, date=date(2026, 11, 15), purpose='Excuse B', diagnosis='Flu')
+        try:
+            # 1. Unauthenticated requests must be rejected (401)
+            for view, path in (
+                (MedicalCertificateViewSet.as_view({'get': 'list'}), '/api/certificates/'),
+                (PatientViewSet.as_view({'get': 'list'}), '/api/patients/'),
+                (MedicineItemViewSet.as_view({'get': 'list'}), '/api/medicines/'),
+                (AuditLogViewSet.as_view({'get': 'list'}), '/api/audit-logs/'),
+            ):
+                resp = view(factory.get(path))
+                self.assertEqual(resp.status_code, 401, path)
+
+            # 2. Student A sees only own MedicalCertificate even when requesting ?patient=__STU_B__
+            req_list = factory.get(f'/api/certificates/?patient={pat_b.id}')
+            force_authenticate(req_list, user=stu_a_user)
+            list_resp = MedicalCertificateViewSet.as_view({'get': 'list'})(req_list)
+            self.assertEqual(list_resp.status_code, 200)
+            self.assertEqual(list_resp.data, [])
+
+            req_own = factory.get('/api/certificates/')
+            force_authenticate(req_own, user=stu_a_user)
+            own_resp = MedicalCertificateViewSet.as_view({'get': 'list'})(req_own)
+            self.assertEqual(own_resp.status_code, 200)
+            self.assertEqual([item['id'] for item in own_resp.data], [str(cert_a.id)])
+
+            # 3. Student A cannot access clinic inventory/audit or forge medcert/request for Student B
+            for view, path in (
+                (MedicineItemViewSet.as_view({'get': 'list'}), '/api/medicines/'),
+                (AuditLogViewSet.as_view({'get': 'list'}), '/api/audit-logs/'),
+            ):
+                r = factory.get(path)
+                force_authenticate(r, user=stu_a_user)
+                self.assertEqual(view(r).status_code, 403, path)
+
+            forged_cert = factory.post('/api/certificates/', {'patient': pat_b.id, 'date': '2026-11-15', 'purpose': 'Fake'}, format='json')
+            force_authenticate(forged_cert, user=stu_a_user)
+            self.assertEqual(MedicalCertificateViewSet.as_view({'post': 'create'})(forged_cert).status_code, 403)
+
+            forged_req = factory.post('/api/medcert-requests/', {'patient': pat_b.id, 'purpose': 'Fake', 'complaint': 'x'}, format='json')
+            force_authenticate(forged_req, user=stu_a_user)
+            self.assertEqual(MedicalCertificateRequestViewSet.as_view({'post': 'create'})(forged_req).status_code, 403)
+        finally:
+            MedicalCertificate.objects.filter(id__in=[cert_a.id, cert_b.id]).delete()
+            Patient.objects.filter(id__in=[pat_a.id, pat_b.id]).delete()
+            User.objects.filter(id=stu_a_user.id).delete()
 
 
 

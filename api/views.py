@@ -7,7 +7,10 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .auth_utils import (
     USER_MGMT_SENTINEL,
+    IsClinicStaff,
+    IsStaffOrReadOnly,
     get_env_mgmt_passwords,
+    get_user_patients,
     hash_staff_pin,
     is_main_cura_login_password,
     is_staff_account,
@@ -22,8 +25,9 @@ from django.conf import settings
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, viewsets
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.permissions import IsAuthenticated, AllowAny, SAFE_METHODS
+from rest_framework.decorators import action, api_view, permission_classes as drf_permission_classes
 from google.oauth2 import id_token
 from google.auth.transport import requests
 from django.db.models import Exists, OuterRef
@@ -1153,22 +1157,62 @@ class CustomTokenRefreshView(TokenRefreshView):
         return response
 
 class LogoutView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
     def post(self, request, *args, **kwargs):
         response = Response({"detail": "Successfully logged out."}, status=status.HTTP_200_OK)
         response.delete_cookie(settings.SIMPLE_JWT['AUTH_COOKIE'])
         return response
 
+
+class PatientScopedMixin:
+    """Restrict non-staff users to their own linked Patient rows and block cross-patient writes."""
+    patient_lookup_field = 'patient'
+    allow_patient_create = False
+    allow_patient_update = False
+
+    def get_permissions(self):
+        if not self.allow_patient_create and getattr(self, 'action', None) in ('create', 'destroy'):
+            return [IsClinicStaff()]
+        if not self.allow_patient_update and getattr(self, 'action', None) in ('update', 'partial_update'):
+            return [IsClinicStaff()]
+        return [IsAuthenticated()]
+
+    def _get_owned_patient_ids(self, user):
+        return list(get_user_patients(user).values_list('id', flat=True))
+
+    def _assert_owned_patient_id(self, request, raw_patient_id):
+        if is_staff_account(request.user):
+            return
+        own_ids = {str(pid).strip().lower() for pid in self._get_owned_patient_ids(request.user)}
+        target = str(raw_patient_id or '').strip().lower()
+        if not target or target not in own_ids:
+            raise PermissionDenied('You can only access or modify your own patient record.')
+
+    def filter_queryset_for_user(self, qs):
+        user = getattr(self.request, 'user', None)
+        if is_staff_account(user):
+            return qs
+        own_ids = self._get_owned_patient_ids(user)
+        if not own_ids:
+            return qs.none()
+        return qs.filter(**{f'{self.patient_lookup_field}__in': own_ids})
+
+
 # --- Phase 4 ViewSets ---
 
-class PatientViewSet(viewsets.ModelViewSet):
+class PatientViewSet(PatientScopedMixin, viewsets.ModelViewSet):
     queryset = Patient.objects.all()
     serializer_class = PatientSerializer
-    # permission_classes = [IsAuthenticated]
+    patient_lookup_field = 'id'
+    allow_patient_update = True
 
     def get_queryset(self):
         qs = Patient.objects.annotate(
             is_claimed=Exists(User.objects.filter(username__iexact=OuterRef('email')))
         )
+        qs = self.filter_queryset_for_user(qs)
         email = self.request.query_params.get('email')
         if email:
             return qs.filter(email__iexact=email.strip())
@@ -1193,6 +1237,11 @@ class PatientViewSet(viewsets.ModelViewSet):
         email = request.data.get('email', '').strip()
         if not email:
             return Response({'error': 'Email required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not is_staff_account(request.user):
+            user_email = (getattr(request.user, 'email', '') or '').strip().lower()
+            user_name = (getattr(request.user, 'username', '') or '').strip().lower()
+            if email.lower() not in (user_email, user_name):
+                return Response({'error': 'Forbidden'}, status=status.HTTP_403_FORBIDDEN)
         patient = Patient.objects.filter(email__iexact=email).first()
         if not patient:
             return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -1202,17 +1251,17 @@ class PatientViewSet(viewsets.ModelViewSet):
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-class ConsultationViewSet(viewsets.ModelViewSet):
+class ConsultationViewSet(PatientScopedMixin, viewsets.ModelViewSet):
     queryset = Consultation.objects.prefetch_related('treatments').all().order_by('-date', '-timeIn')
     serializer_class = ConsultationSerializer
 
     def get_queryset(self):
         qs = Consultation.objects.prefetch_related('treatments').order_by('-date', '-timeIn')
+        qs = self.filter_queryset_for_user(qs)
         patient_id = self.request.query_params.get('patient')
         if patient_id:
             return qs.filter(patient_id=patient_id)
         return qs
-    # permission_classes = [IsAuthenticated]
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -1242,10 +1291,14 @@ class ConsultationViewSet(viewsets.ModelViewSet):
 
         return super().create(request, *args, **kwargs)
 
-class TreatmentViewSet(viewsets.ModelViewSet):
+class TreatmentViewSet(PatientScopedMixin, viewsets.ModelViewSet):
     queryset = Treatment.objects.all()
     serializer_class = TreatmentSerializer
-    # permission_classes = [IsAuthenticated]
+    patient_lookup_field = 'consultation__patient'
+    allow_patient_update = True
+
+    def get_queryset(self):
+        return self.filter_queryset_for_user(Treatment.objects.all())
 
 def _apply_medicine_stock_delta(med, qty, tx_type, note):
     if tx_type == 'add':
@@ -1277,7 +1330,7 @@ def _apply_medicine_stock_delta(med, qty, tx_type, note):
 class MedicineItemViewSet(viewsets.ModelViewSet):
     queryset = MedicineItem.objects.prefetch_related('stockHistory').all()
     serializer_class = MedicineItemSerializer
-    # permission_classes = [IsAuthenticated]
+    permission_classes = [IsClinicStaff]
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -1323,12 +1376,12 @@ class MedicineItemViewSet(viewsets.ModelViewSet):
 class StockHistoryViewSet(viewsets.ModelViewSet):
     queryset = StockHistory.objects.all()
     serializer_class = StockHistorySerializer
-    # permission_classes = [IsAuthenticated]
+    permission_classes = [IsClinicStaff]
 
 class PurchaseRequestViewSet(viewsets.ModelViewSet):
     queryset = PurchaseRequest.objects.prefetch_related('history').all()
     serializer_class = PurchaseRequestSerializer
-    # permission_classes = [IsAuthenticated]
+    permission_classes = [IsClinicStaff]
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -1442,15 +1495,14 @@ class PurchaseRequestViewSet(viewsets.ModelViewSet):
 class PurchaseHistoryViewSet(viewsets.ModelViewSet):
     queryset = PurchaseHistory.objects.all()
     serializer_class = PurchaseHistorySerializer
-    # permission_classes = [IsAuthenticated]
+    permission_classes = [IsClinicStaff]
 
-class MedicalCertificateViewSet(viewsets.ModelViewSet):
+class MedicalCertificateViewSet(PatientScopedMixin, viewsets.ModelViewSet):
     queryset = MedicalCertificate.objects.select_related('patient').all()
     serializer_class = MedicalCertificateSerializer
-    # permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = MedicalCertificate.objects.select_related('patient').all()
+        qs = self.filter_queryset_for_user(MedicalCertificate.objects.select_related('patient').all())
         patient_id = self.request.query_params.get('patient')
         if patient_id:
             return qs.filter(patient_id=patient_id)
@@ -1501,7 +1553,11 @@ class MedicalCertificateViewSet(viewsets.ModelViewSet):
 class BedViewSet(viewsets.ModelViewSet):
     queryset = Bed.objects.prefetch_related('history').all().order_by('bedNumber')
     serializer_class = BedSerializer
-    # permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if getattr(self, 'action', None) in ('list', 'retrieve'):
+            return [IsAuthenticated()]
+        return [IsClinicStaff()]
 
     def list(self, request, *args, **kwargs):
         if not Bed.objects.exists():
@@ -1512,22 +1568,33 @@ class BedViewSet(viewsets.ModelViewSet):
 class BedHistoryViewSet(viewsets.ModelViewSet):
     queryset = BedHistory.objects.all()
     serializer_class = BedHistorySerializer
-    # permission_classes = [IsAuthenticated]
+    permission_classes = [IsClinicStaff]
 
 class HospitalTransferViewSet(viewsets.ModelViewSet):
     queryset = HospitalTransfer.objects.all()
     serializer_class = HospitalTransferSerializer
-    # permission_classes = [IsAuthenticated]
+    permission_classes = [IsClinicStaff]
 
 class AppNotificationViewSet(viewsets.ModelViewSet):
     queryset = AppNotification.objects.all().order_by('-time')
     serializer_class = AppNotificationSerializer
-    # permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated]
 
     PATIENT_TYPES = ['appointment_update', 'telemedicine_update', 'certificate']
 
     def _scope_for_audience(self, qs, audience, request):
         from django.db.models import Q
+        if not is_staff_account(getattr(request, 'user', None)):
+            own_patients = list(get_user_patients(getattr(request, 'user', None)).values('id', 'name'))
+            own_ids = [str(p['id']).strip() for p in own_patients if p.get('id')]
+            own_names = [str(p['name']).strip() for p in own_patients if p.get('name')]
+            qs = qs.exclude(type__in=['appointment_request', 'telemedicine_request', 'medcert_request', 'stock'])
+            query = Q()
+            if own_ids:
+                query |= Q(patient_id__in=own_ids)
+            for pname in own_names:
+                query |= Q(patientName__iexact=pname)
+            return qs.filter(query) if query else qs.none()
         if audience in ('admin', 'web'):
             return qs.exclude(type__in=self.PATIENT_TYPES).exclude(
                 Q(type='general', message__icontains="it's your turn") |
@@ -1655,13 +1722,23 @@ def _availability_response(model_cls, request):
     })
 
 
-class TelemedicineRequestViewSet(viewsets.ModelViewSet):
+class TelemedicineRequestViewSet(PatientScopedMixin, viewsets.ModelViewSet):
     queryset = TelemedicineRequest.objects.select_related('patient').all().order_by('-created_at')
     serializer_class = TelemedicineRequestSerializer
-    # permission_classes = [IsAuthenticated]
+    allow_patient_create = True
+
+    def get_permissions(self):
+        action_name = getattr(self, 'action', None)
+        if action_name == 'availability':
+            return [AllowAny()] if self.request.method in SAFE_METHODS else [IsClinicStaff()]
+        if action_name == 'approve':
+            return [IsClinicStaff()]
+        return super().get_permissions()
 
     def get_queryset(self):
-        qs = TelemedicineRequest.objects.select_related('patient').all().order_by('-created_at')
+        qs = self.filter_queryset_for_user(
+            TelemedicineRequest.objects.select_related('patient').all().order_by('-created_at')
+        )
         patient_id = self.request.query_params.get('patient')
         if patient_id:
             return qs.filter(patient_id=patient_id)
@@ -1673,6 +1750,7 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
                 {'error': 'Telemedicine is currently locked (Coming Soon).'},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        self._assert_owned_patient_id(request, request.data.get('patient'))
         response = super().create(request, *args, **kwargs)
         if response.status_code == 201:
             from .models import AppNotification, Patient
@@ -1747,7 +1825,7 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(telemed_request)
         return Response(serializer.data)
 
-    @action(detail=False, methods=['get', 'post'], permission_classes=[])
+    @action(detail=False, methods=['get', 'post'])
     def availability(self, request):
         return _availability_response(TelemedicineAvailability, request)
 
@@ -1756,13 +1834,23 @@ class TelemedicineRequestViewSet(viewsets.ModelViewSet):
 from .models import AppointmentRequest
 from .serializers import AppointmentRequestSerializer
 
-class AppointmentRequestViewSet(viewsets.ModelViewSet):
+class AppointmentRequestViewSet(PatientScopedMixin, viewsets.ModelViewSet):
     queryset = AppointmentRequest.objects.select_related('patient').all().order_by('-created_at')
     serializer_class = AppointmentRequestSerializer
-    # permission_classes = [IsAuthenticated]
+    allow_patient_create = True
+
+    def get_permissions(self):
+        action_name = getattr(self, 'action', None)
+        if action_name == 'availability':
+            return [AllowAny()] if self.request.method in SAFE_METHODS else [IsClinicStaff()]
+        if action_name == 'approve':
+            return [IsClinicStaff()]
+        return super().get_permissions()
 
     def get_queryset(self):
-        qs = AppointmentRequest.objects.select_related('patient').all().order_by('-created_at')
+        qs = self.filter_queryset_for_user(
+            AppointmentRequest.objects.select_related('patient').all().order_by('-created_at')
+        )
         patient_id = self.request.query_params.get('patient')
         if patient_id:
             return qs.filter(patient_id=patient_id)
@@ -1774,6 +1862,7 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
                 {'error': 'Appointments are currently locked (Coming Soon).'},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        self._assert_owned_patient_id(request, request.data.get('patient'))
         response = super().create(request, *args, **kwargs)
         if response.status_code == 201:
             from .models import AppNotification, Patient
@@ -1837,7 +1926,7 @@ class AppointmentRequestViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(appointment)
         return Response(serializer.data)
 
-    @action(detail=False, methods=['get', 'post'], permission_classes=[])
+    @action(detail=False, methods=['get', 'post'])
     def availability(self, request):
         return _availability_response(AppointmentAvailability, request)
 
@@ -1847,8 +1936,14 @@ from .models import PatientQueue
 from .serializers import PatientQueueSerializer
 from django.db import transaction
 
-class PatientQueueViewSet(viewsets.ModelViewSet):
+class PatientQueueViewSet(PatientScopedMixin, viewsets.ModelViewSet):
     serializer_class = PatientQueueSerializer
+    allow_patient_create = True
+
+    def get_permissions(self):
+        if getattr(self, 'action', None) in ('notify', 'complete', 'update', 'partial_update', 'destroy'):
+            return [IsClinicStaff()]
+        return [IsAuthenticated()]
 
     def get_queryset(self):
         req_date = self.request.query_params.get('date')
@@ -1867,6 +1962,7 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
         patient_id = request.data.get('patient')
         if not patient_id:
             return Response({"error": "Patient ID is required"}, status=status.HTTP_400_BAD_REQUEST)
+        self._assert_owned_patient_id(request, patient_id)
         
         from .models import Patient
         
@@ -1928,6 +2024,7 @@ class PatientQueueViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['patch', 'post'])
     def cancel(self, request, pk=None):
         queue = self.get_object()
+        self._assert_owned_patient_id(request, queue.patient_id)
         queue.status = 'done'
         queue.save()
         serializer = self.get_serializer(queue)
@@ -1937,7 +2034,7 @@ from .models import ClinicAdvisory
 from .serializers import ClinicAdvisorySerializer
 
 class ClinicAdvisoryViewSet(viewsets.ModelViewSet):
-    permission_classes = [AllowAny]
+    permission_classes = [IsStaffOrReadOnly]
     queryset = ClinicAdvisory.objects.all()
     serializer_class = ClinicAdvisorySerializer
 
@@ -1967,18 +2064,27 @@ class ClinicAdvisoryViewSet(viewsets.ModelViewSet):
 from .models import MedicalCertificateRequest
 from .serializers import MedicalCertificateRequestSerializer
 
-class MedicalCertificateRequestViewSet(viewsets.ModelViewSet):
+class MedicalCertificateRequestViewSet(PatientScopedMixin, viewsets.ModelViewSet):
     queryset = MedicalCertificateRequest.objects.select_related('patient').all().order_by('-created_at')
     serializer_class = MedicalCertificateRequestSerializer
+    allow_patient_create = True
+
+    def get_permissions(self):
+        if getattr(self, 'action', None) == 'approve':
+            return [IsClinicStaff()]
+        return super().get_permissions()
 
     def get_queryset(self):
-        qs = MedicalCertificateRequest.objects.select_related('patient').all().order_by('-created_at')
+        qs = self.filter_queryset_for_user(
+            MedicalCertificateRequest.objects.select_related('patient').all().order_by('-created_at')
+        )
         patient_id = self.request.query_params.get('patient')
         if patient_id:
             return qs.filter(patient_id=patient_id)
         return qs
 
     def create(self, request, *args, **kwargs):
+        self._assert_owned_patient_id(request, request.data.get('patient'))
         response = super().create(request, *args, **kwargs)
         if response.status_code == 201:
             patient_id = response.data.get('patient')
@@ -2127,8 +2233,19 @@ def _record_lockout_failure(attempt, invalid_error, max_attempts=5, lockout_minu
 class ClinicStaffViewSet(viewsets.ModelViewSet):
     queryset = ClinicStaff.objects.all().order_by('name')
     serializer_class = ClinicStaffSerializer
-    authentication_classes = []
-    permission_classes = [AllowAny]
+
+    def get_authenticators(self):
+        if self.request and getattr(self.request, 'method', 'GET') == 'GET':
+            return []
+        path = (getattr(self.request, 'path', '') or '').lower()
+        if any(seg in path for seg in ('verify-admin', 'change-admin-password', 'verify-pin')):
+            return []
+        return super().get_authenticators()
+
+    def get_permissions(self):
+        if getattr(self, 'action', None) in ('list', 'retrieve', 'verify_admin', 'change_admin_password', 'verify_pin'):
+            return [AllowAny()]
+        return [IsClinicStaff()]
 
     @action(detail=False, methods=['post'], url_path='verify-admin')
     def verify_admin(self, request):
@@ -2227,6 +2344,7 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
 class AuditLogViewSet(viewsets.ModelViewSet):
     queryset = AuditLog.objects.exclude(action='SYSTEM_GDRIVE_CONFIG').order_by('-timestamp')
     serializer_class = AuditLogSerializer
+    permission_classes = [IsClinicStaff]
 
     def get_queryset(self):
         qs = AuditLog.objects.exclude(action='SYSTEM_GDRIVE_CONFIG').order_by('-timestamp')
@@ -2280,7 +2398,7 @@ class AuditLogViewSet(viewsets.ModelViewSet):
 
 
 class MediaUploadView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         from .gdrive_service import offload_image
@@ -2306,7 +2424,7 @@ class MediaUploadView(APIView):
 
 
 class MediaConfigView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsClinicStaff]
 
     def post(self, request):
         from .gdrive_service import set_runtime_credentials
@@ -2337,7 +2455,7 @@ def serve_drive_media(request, drive_id):
 
 
 class ReportArchiveView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsClinicStaff]
 
     def get(self, request):
         from .gdrive_service import list_drive_archives
@@ -2377,7 +2495,7 @@ class ReportArchiveView(APIView):
 
 
 class ReportSyncSnapshotView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsClinicStaff]
 
     def post(self, request):
         import csv
@@ -2422,6 +2540,8 @@ class ReportSyncSnapshotView(APIView):
         return Response(info, status=status.HTTP_200_OK)
 
 
+@api_view(['GET'])
+@drf_permission_classes([IsClinicStaff])
 def download_drive_archive(request, drive_id):
     from django.http import HttpResponse, Http404
     from .gdrive_service import fetch_media_from_drive

@@ -9,7 +9,9 @@ from decouple import config
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import check_password
+from django.db.models import Q
 from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.permissions import SAFE_METHODS, BasePermission
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -53,6 +55,39 @@ def verify_staff_pin(pin: str, stored_hash: str) -> tuple[bool, bool]:
 def is_staff_account(user) -> bool:
     """Return True only when user has explicit boolean staff or superuser privileges."""
     return getattr(user, 'is_staff', False) is True or getattr(user, 'is_superuser', False) is True
+
+
+class IsClinicStaff(BasePermission):
+    """Allow access only to authenticated clinic staff or superuser accounts."""
+
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and is_staff_account(request.user))
+
+
+class IsStaffOrReadOnly(BasePermission):
+    """Allow public safe reads; restrict mutations to authenticated clinic staff."""
+
+    def has_permission(self, request, view):
+        if request.method in SAFE_METHODS:
+            return True
+        return bool(request.user and request.user.is_authenticated and is_staff_account(request.user))
+
+
+def get_user_patients(user):
+    """Return Patient queryset belonging to the authenticated patient user."""
+    from .models import Patient
+    if not user or not user.is_authenticated:
+        return Patient.objects.none()
+    query = Q()
+    email = (getattr(user, 'email', '') or '').strip()
+    username = (getattr(user, 'username', '') or '').strip()
+    if email:
+        query |= Q(email__iexact=email)
+    if username:
+        query |= Q(id__iexact=username) | Q(email__iexact=username)
+    if not query:
+        return Patient.objects.none()
+    return Patient.objects.filter(query)
 
 
 def password_signature(user) -> str:
@@ -184,7 +219,7 @@ def is_valid_mgmt_password(password: str) -> bool:
         except Exception:
             pass
 
-    if not env_candidates and not (sentinel and sentinel.has_usable_password()):
+    if settings.DEBUG and not env_candidates and not (sentinel and sentinel.has_usable_password()):
         return clean_pw == DEFAULT_MGMT_PASSWORD
 
     return False

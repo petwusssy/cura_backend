@@ -8,6 +8,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .auth_utils import (
     USER_MGMT_SENTINEL,
     get_env_mgmt_passwords,
+    hash_staff_pin,
     is_main_cura_login_password,
     is_staff_account,
     is_valid_mgmt_password,
@@ -15,6 +16,7 @@ from .auth_utils import (
     populate_token_claims,
     set_refresh_cookie,
     verify_refresh_token_signature,
+    verify_staff_pin,
 )
 from django.conf import settings
 from rest_framework.views import APIView
@@ -82,6 +84,7 @@ def _rekey_patient_safely(patient: Patient, new_id: str) -> Patient:
 
 
 class GoogleLoginView(APIView):
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -1042,7 +1045,9 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         data['roles'] = roles
         data['username'] = self.user.username
 
-        patient = Patient.objects.filter(email__iexact=self.user.email).first() or Patient.objects.filter(id__iexact=self.user.username).first()
+        patient = None
+        if not (self.user.is_staff or self.user.is_superuser):
+            patient = Patient.objects.filter(email__iexact=self.user.email).first() or Patient.objects.filter(id__iexact=self.user.username).first()
         data['user'] = {
             'id': patient.id if patient else self.user.username,
             'name': patient.name if patient else (self.user.first_name or self.user.username),
@@ -1052,6 +1057,8 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return data
 
 class CustomTokenObtainPairView(TokenObtainPairView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
     serializer_class = CustomTokenObtainPairSerializer
 
     def handle_exception(self, exc):
@@ -1109,6 +1116,9 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         return response
 
 class CustomTokenRefreshView(TokenRefreshView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
     def post(self, request, *args, **kwargs):
         cookie_refresh = request.COOKIES.get(settings.SIMPLE_JWT['AUTH_COOKIE'])
         body_refresh = request.data.get('refresh') if hasattr(request.data, 'get') else None
@@ -2190,8 +2200,16 @@ class ClinicStaffViewSet(viewsets.ModelViewSet):
         if locked_response is not None:
             return locked_response
 
-        for staff_member in ClinicStaff.objects.filter(is_active=True):
-            if check_password(pin, staff_member.pin_hash):
+        active_staff = sorted(
+            ClinicStaff.objects.filter(is_active=True).only('id', 'name', 'role', 'pin_hash', 'allowed_pages'),
+            key=lambda s: not (s.pin_hash or '').startswith('hmac_sha256$'),
+        )
+        for staff_member in active_staff:
+            matched, needs_rehash = verify_staff_pin(pin, staff_member.pin_hash)
+            if matched:
+                if needs_rehash:
+                    staff_member.pin_hash = hash_staff_pin(pin)
+                    staff_member.save(update_fields=['pin_hash'])
                 _clear_lockout_attempt(attempt)
                 return Response({
                     'valid': True,

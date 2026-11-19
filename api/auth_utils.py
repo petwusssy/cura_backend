@@ -1,11 +1,14 @@
 import hashlib
+import hmac
 import json
 import os
+import secrets
 import urllib.request
 
 from decouple import config
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import check_password
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import TokenError
@@ -13,6 +16,38 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 USER_MGMT_SENTINEL = '__cura_user_mgmt__'
 DEFAULT_MGMT_PASSWORD = 'uaclinic-admin'
+_PIN_HMAC_PREFIX = 'hmac_sha256$'
+
+
+def hash_staff_pin(pin: str) -> str:
+    """Create a fast salted HMAC-SHA256 hash keyed with SECRET_KEY for 4-digit staff PINs."""
+    salt = secrets.token_hex(8)
+    digest = hmac.new(
+        (settings.SECRET_KEY or '').encode('utf-8'),
+        f'{salt}:{pin}'.encode('utf-8'),
+        hashlib.sha256,
+    ).hexdigest()
+    return f'{_PIN_HMAC_PREFIX}{salt}${digest}'
+
+
+def verify_staff_pin(pin: str, stored_hash: str) -> tuple[bool, bool]:
+    """Return (matched, needs_rehash) for a staff PIN hash, auto-upgrading legacy PBKDF2 hashes."""
+    if not stored_hash:
+        return False, False
+    if stored_hash.startswith(_PIN_HMAC_PREFIX):
+        parts = stored_hash.split('$', 2)
+        if len(parts) != 3:
+            return False, False
+        _, salt, expected = parts
+        actual = hmac.new(
+            (settings.SECRET_KEY or '').encode('utf-8'),
+            f'{salt}:{pin}'.encode('utf-8'),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(actual, expected), False
+    if check_password(pin, stored_hash):
+        return True, True
+    return False, False
 
 
 def is_staff_account(user) -> bool:

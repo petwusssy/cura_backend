@@ -291,7 +291,7 @@ class MedicalCertificateRequestSerializer(serializers.ModelSerializer):
         model = MedicalCertificateRequest
         fields = '__all__'
 
-from django.contrib.auth.hashers import make_password, check_password
+from .auth_utils import hash_staff_pin, verify_staff_pin
 from .models import ClinicStaff, AuditLog
 
 class ClinicStaffSerializer(serializers.ModelSerializer):
@@ -307,7 +307,8 @@ class ClinicStaffSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("PIN must be exactly 4 digits.")
         instance_id = self.instance.id if self.instance else None
         for staff in ClinicStaff.objects.filter(is_active=True).exclude(id=instance_id):
-            if check_password(value, staff.pin_hash):
+            matched, _ = verify_staff_pin(value, staff.pin_hash)
+            if matched:
                 raise serializers.ValidationError("This 4-digit PIN is already assigned to another active staff member.")
         return value
 
@@ -316,7 +317,7 @@ class ClinicStaffSerializer(serializers.ModelSerializer):
         if not pin:
             raise serializers.ValidationError({'pin': 'A 4-digit PIN is required.'})
         validated_data['name'] = validated_data.get('name', '').strip().upper()
-        validated_data['pin_hash'] = make_password(pin)
+        validated_data['pin_hash'] = hash_staff_pin(pin)
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
@@ -324,7 +325,7 @@ class ClinicStaffSerializer(serializers.ModelSerializer):
         if 'name' in validated_data:
             validated_data['name'] = validated_data['name'].strip().upper()
         if pin:
-            instance.pin_hash = make_password(pin)
+            instance.pin_hash = hash_staff_pin(pin)
         return super().update(instance, validated_data)
 
 

@@ -751,6 +751,61 @@ class PrivacySecurityTests(unittest.TestCase):
             MedicalCertificate.objects.filter(patient=patient).delete()
             Patient.objects.filter(id=patient.id).delete()
 
+    def test_first_login_ignores_stale_bearer_and_pin_auto_upgrades_to_hmac(self):
+        from django.contrib.auth.hashers import make_password
+        from django.contrib.auth.models import User
+        from rest_framework.test import APIRequestFactory
+        from api.models import ClinicStaff, LoginAttempt
+        from api.serializers import ClinicStaffSerializer
+        from api.views import ClinicStaffViewSet, CustomTokenObtainPairView, STAFF_PIN_SENTINEL
+
+        factory = APIRequestFactory()
+        User.objects.filter(username='__test_stale_login__').delete()
+        u = User.objects.create_user(
+            username='__test_stale_login__',
+            password='ClinicLogin123!',
+            is_staff=True,
+        )
+        LoginAttempt.objects.filter(identifier__startswith=STAFF_PIN_SENTINEL).delete()
+        LoginAttempt.objects.filter(identifier='__test_stale_login__').delete()
+        legacy_staff = ClinicStaff.objects.create(
+            name='__LEGACY_PIN_STAFF__',
+            role='Nurse',
+            pin_hash=make_password('7391'),
+            is_active=True,
+        )
+        fast_staff = None
+        try:
+            # First login attempt carrying an expired/forged Bearer header must succeed immediately
+            login_req = factory.post(
+                '/api/auth/login/',
+                {'username': '__test_stale_login__', 'password': 'ClinicLogin123!'},
+                format='json',
+                HTTP_AUTHORIZATION='Bearer invalid.stale.token',
+            )
+            login_resp = CustomTokenObtainPairView.as_view()(login_req)
+            self.assertEqual(login_resp.status_code, 200)
+            self.assertIn('access', login_resp.data)
+
+            # New staff PINs use fast keyed hmac_sha256$ hash and detect duplicates cleanly
+            ser = ClinicStaffSerializer(data={'name': '__FAST_PIN_STAFF__', 'role': 'Nurse', 'pin': '8246'})
+            self.assertTrue(ser.is_valid(), ser.errors)
+            fast_staff = ser.save()
+            self.assertTrue(fast_staff.pin_hash.startswith('hmac_sha256$'))
+
+            # Legacy PBKDF2 PIN verifies cleanly and upgrades to hmac_sha256$ in place
+            pin_view = ClinicStaffViewSet.as_view({'post': 'verify_pin'})
+            ok_resp = pin_view(factory.post('/api/staff/verify-pin/', {'pin': '7391'}, format='json'))
+            self.assertEqual(ok_resp.status_code, 200)
+            self.assertTrue(ok_resp.data['valid'])
+            legacy_staff.refresh_from_db()
+            self.assertTrue(legacy_staff.pin_hash.startswith('hmac_sha256$'))
+        finally:
+            ClinicStaff.objects.filter(id__in=[s.id for s in (legacy_staff, fast_staff) if s]).delete()
+            LoginAttempt.objects.filter(identifier__startswith=STAFF_PIN_SENTINEL).delete()
+            LoginAttempt.objects.filter(identifier='__test_stale_login__').delete()
+            User.objects.filter(id=u.id).delete()
+
 
 
 

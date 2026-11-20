@@ -182,6 +182,7 @@ class MedicineItem(models.Model):
     dispensed = models.IntegerField(default=0)
     category = models.CharField(max_length=50, default='Medicine')
     threshold = models.IntegerField(default=15)
+    expirationDate = models.CharField(max_length=50, blank=True, null=True)
 
     def __str__(self):
         return self.name

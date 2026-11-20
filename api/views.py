@@ -1300,6 +1300,37 @@ class TreatmentViewSet(PatientScopedMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         return self.filter_queryset_for_user(Treatment.objects.all())
 
+_FAST_MOVING_MED_KEYWORDS = (
+    'biogesic',
+    'strepsils',
+    'sinupret',
+    'allerta',
+    'nafarin',
+    'buscopan plus',
+    'buscopan 10mg',
+    'buscopan',
+    'hydrite',
+    'cetirizine',
+    'zyrtec',
+    'alnix',
+    'gaviscon sachet',
+    'kremil-s',
+    'kramil-s',
+    'hidrasec',
+    'imodium',
+    'dolfenal',
+)
+
+
+def _get_effective_med_threshold(med) -> int:
+    name_low = (getattr(med, 'name', '') or '').strip().lower()
+    is_fast = any(k in name_low for k in _FAST_MOVING_MED_KEYWORDS)
+    raw_t = getattr(med, 'threshold', None)
+    if is_fast:
+        return 100 if (raw_t is None or raw_t <= 15) else raw_t
+    return 15 if (raw_t is None or raw_t <= 5) else raw_t
+
+
 def _apply_medicine_stock_delta(med, qty, tx_type, note):
     if tx_type == 'add':
         med.stock = max(0, (med.stock or 0)) + qty
@@ -1310,7 +1341,8 @@ def _apply_medicine_stock_delta(med, qty, tx_type, note):
         med.stock = max(0, (med.stock or 0)) - qty
         med.dispensed = (med.dispensed or 0) + (actual_dispensed if actual_dispensed > 0 else qty)
 
-    threshold = med.threshold if med.threshold is not None else 15
+    threshold = _get_effective_med_threshold(med)
+    med.threshold = threshold
     if med.stock <= 0:
         med.status = 'Out of Stock'
     elif med.stock <= threshold:

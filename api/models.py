@@ -183,6 +183,7 @@ class MedicineItem(models.Model):
     category = models.CharField(max_length=50, default='Medicine')
     threshold = models.IntegerField(default=15)
     expirationDate = models.CharField(max_length=50, blank=True, null=True)
+    batches = models.JSONField(default=list, blank=True)
 
     def __str__(self):
         return self.name
@@ -199,6 +200,8 @@ class StockHistory(models.Model):
     qty = models.IntegerField()
     type = models.CharField(max_length=20, choices=TYPE_CHOICES)
     note = models.TextField(blank=True, null=True)
+    batchNumber = models.CharField(max_length=100, blank=True, null=True)
+    expirationDate = models.CharField(max_length=50, blank=True, null=True)
 
 class PurchaseRequest(models.Model):
     STATUS_CHOICES = [
@@ -225,6 +228,8 @@ class PurchaseHistory(models.Model):
     date = models.DateField()
     qty = models.IntegerField()
     note = models.TextField(blank=True, null=True)
+    batchNumber = models.CharField(max_length=100, blank=True, null=True)
+    expirationDate = models.CharField(max_length=50, blank=True, null=True)
 
 class MedicalCertificate(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

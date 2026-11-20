@@ -1322,6 +1322,49 @@ _FAST_MOVING_MED_KEYWORDS = (
 )
 
 
+_SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+
+def _format_exp_display(raw) -> str:
+    val = (str(raw or '')).strip()
+    if not val:
+        return ''
+    if val.upper() in ('NO STOCK', 'CONSUMED'):
+        return val.upper()
+    import re
+    m_iso = re.match(r'^(\d{4})-(\d{2})(?:-\d{2})?$', val)
+    if m_iso:
+        y_short = m_iso.group(1)[2:]
+        m_idx = int(m_iso.group(2)) - 1
+        if 0 <= m_idx < 12:
+            return f"{_SHORT_MONTHS[m_idx]}-{y_short}"
+    m_mmm = re.match(r'^([a-zA-Z]{3})[-/\s](\d{2,4})$', val)
+    if m_mmm:
+        m_str = m_mmm.group(1)[:1].upper() + m_mmm.group(1)[1:3].lower()
+        y_raw = m_mmm.group(2)
+        y_str = y_raw[2:] if len(y_raw) == 4 else y_raw
+        return f"{m_str}-{y_str}"
+    return val
+
+
+def _exp_sort_key(raw) -> str:
+    val = _format_exp_display(raw)
+    if not val or val in ('NO STOCK', 'CONSUMED', 'N/A'):
+        return '9999-99'
+    import re
+    m_mmm = re.match(r'^([a-zA-Z]{3})-(\d{2})$', val)
+    if m_mmm:
+        try:
+            m_idx = [m.lower() for m in _SHORT_MONTHS].index(m_mmm.group(1).lower()) + 1
+            return f"20{m_mmm.group(2)}-{m_idx:02d}"
+        except ValueError:
+            pass
+    m_iso = re.match(r'^(\d{4})-(\d{2})', str(raw or '').strip())
+    if m_iso:
+        return f"{m_iso.group(1)}-{m_iso.group(2)}"
+    return '9999-98'
+
+
 def _get_effective_med_threshold(med) -> int:
     name_low = (getattr(med, 'name', '') or '').strip().lower()
     is_fast = any(k in name_low for k in _FAST_MOVING_MED_KEYWORDS)
@@ -1331,15 +1374,84 @@ def _get_effective_med_threshold(med) -> int:
     return 15 if (raw_t is None or raw_t <= 5) else raw_t
 
 
-def _apply_medicine_stock_delta(med, qty, tx_type, note):
+def _apply_medicine_stock_delta(med, qty, tx_type, note, expiration_date=None, batch_number=None, prf_no=None, rx_date=None):
+    old_stock = max(0, int(med.stock or 0))
+    today_iso = str(rx_date or timezone.localdate().isoformat())
+    raw_batches = list(med.batches) if isinstance(getattr(med, 'batches', None), list) else []
+    batches = [dict(b) for b in raw_batches if isinstance(b, dict)]
+
+    # Seed existing unbatched stock before applying delta so FEFO preserves old batch
+    existing_rem_sum = sum(max(0, int(b.get('remainingQty', 0) or 0)) for b in batches)
+    if old_stock > existing_rem_sum:
+        untracked_qty = old_stock - existing_rem_sum
+        seed_exp = _format_exp_display(med.expirationDate) or ''
+        batches.append({
+            'id': f"batch-init-{uuid.uuid4().hex[:8]}",
+            'batchNumber': med.batchNumber or 'INITIAL-BATCH',
+            'prfNo': None,
+            'expirationDate': seed_exp,
+            'initialQty': untracked_qty,
+            'remainingQty': untracked_qty,
+            'receivedDate': med.dateAdded.strftime('%Y-%m-%d') if getattr(med, 'dateAdded', None) else today_iso,
+        })
+
+    formatted_exp = _format_exp_display(expiration_date)
+    clean_batch_no = (str(batch_number or prf_no or '')).strip()
+    deducted_summary = []
+
     if tx_type == 'add':
-        med.stock = max(0, (med.stock or 0)) + qty
+        med.stock = old_stock + qty
         if med.beginningQty is None:
             med.beginningQty = med.stock
+        target_exp = formatted_exp or _format_exp_display(med.expirationDate) or ''
+        target_batch_no = clean_batch_no or (f"BATCH-{today_iso.replace('-', '')}")
+        batches.append({
+            'id': f"batch-{uuid.uuid4().hex[:8]}",
+            'batchNumber': target_batch_no,
+            'prfNo': prf_no or (target_batch_no if target_batch_no.upper().startswith('PRF-') else None),
+            'expirationDate': target_exp,
+            'initialQty': qty,
+            'remainingQty': qty,
+            'receivedDate': today_iso,
+        })
+        clean_batch_no = target_batch_no
+        formatted_exp = target_exp
     else:
-        actual_dispensed = min(max(0, med.stock or 0), qty)
-        med.stock = max(0, (med.stock or 0)) - qty
+        actual_dispensed = min(old_stock, qty)
+        med.stock = max(0, old_stock - qty)
         med.dispensed = (med.dispensed or 0) + (actual_dispensed if actual_dispensed > 0 else qty)
+        # FEFO deduction: sort active batches by earliest expirationDate first
+        batches.sort(key=lambda b: (_exp_sort_key(b.get('expirationDate')), str(b.get('receivedDate') or '')))
+        rem_to_deduct = actual_dispensed
+        for b in batches:
+            b_rem = max(0, int(b.get('remainingQty', 0) or 0))
+            if b_rem <= 0 or rem_to_deduct <= 0:
+                continue
+            take = min(b_rem, rem_to_deduct)
+            b['remainingQty'] = b_rem - take
+            rem_to_deduct -= take
+            b_exp = b.get('expirationDate') or 'N/A'
+            b_no = b.get('batchNumber') or 'Batch'
+            deducted_summary.append((b_no, b_exp, take))
+        if deducted_summary and not clean_batch_no:
+            clean_batch_no = ', '.join(d[0] for d in deducted_summary)
+        if deducted_summary and not formatted_exp:
+            formatted_exp = ', '.join(dict.fromkeys(d[1] for d in deducted_summary if d[1]))
+
+    # Keep batches sorted in FEFO order (earliest expiration first)
+    batches.sort(key=lambda b: (_exp_sort_key(b.get('expirationDate')), str(b.get('receivedDate') or '')))
+    med.batches = batches
+
+    # Set med.expirationDate and med.batchNumber to the earliest active FEFO batch
+    active_batches = [b for b in batches if max(0, int(b.get('remainingQty', 0) or 0)) > 0]
+    if active_batches:
+        first_active = active_batches[0]
+        if first_active.get('expirationDate'):
+            med.expirationDate = first_active.get('expirationDate')
+        if first_active.get('batchNumber'):
+            med.batchNumber = first_active.get('batchNumber')
+    elif formatted_exp and tx_type == 'add':
+        med.expirationDate = formatted_exp
 
     threshold = _get_effective_med_threshold(med)
     med.threshold = threshold
@@ -1351,11 +1463,25 @@ def _apply_medicine_stock_delta(med, qty, tx_type, note):
         med.status = 'Normal'
 
     med.save()
+    final_note = note or ('Stock added' if tx_type == 'add' else 'Dispensed')
+    if tx_type == 'dispense' and deducted_summary and 'FEFO' not in final_note:
+        fefo_tag = ', '.join(f"{b_no} [Exp: {b_exp}] (-{take})" for b_no, b_exp, take in deducted_summary)
+        final_note = f"{final_note} • FEFO: {fefo_tag}"
+    elif tx_type == 'add' and (clean_batch_no or formatted_exp) and 'Exp:' not in final_note:
+        batch_parts = []
+        if clean_batch_no:
+            batch_parts.append(f"Batch: {clean_batch_no}")
+        if formatted_exp:
+            batch_parts.append(f"Exp: {formatted_exp}")
+        final_note = f"{final_note} • {' | '.join(batch_parts)}"
+
     StockHistory.objects.create(
         medicine=med,
         qty=qty,
         type=tx_type,
-        note=note or ('Stock added' if tx_type == 'add' else 'Dispensed'),
+        note=final_note,
+        batchNumber=clean_batch_no or None,
+        expirationDate=formatted_exp or None,
     )
 
 
@@ -1378,7 +1504,8 @@ class MedicineItemViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['patch', 'post'], url_path='stock')
     def update_stock(self, request, pk=None):
         try:
-            qty = int(request.data.get('qty', 0))
+            raw_qty = request.data.get('qty') if request.data.get('qty') is not None else request.data.get('quantity', 0)
+            qty = int(raw_qty)
         except (ValueError, TypeError):
             return Response({'error': 'Valid integer qty is required.'}, status=status.HTTP_400_BAD_REQUEST)
         if qty <= 0:
@@ -1388,6 +1515,8 @@ class MedicineItemViewSet(viewsets.ModelViewSet):
         if tx_type not in ('add', 'dispense'):
             return Response({'error': "type must be 'add' or 'dispense'."}, status=status.HTTP_400_BAD_REQUEST)
         note = (request.data.get('note') or '').strip()
+        exp_date = (request.data.get('expirationDate') or request.data.get('expiration_date') or '').strip()
+        batch_no = (request.data.get('batchNumber') or request.data.get('batch_number') or '').strip()
 
         with transaction.atomic():
             try:
@@ -1395,7 +1524,14 @@ class MedicineItemViewSet(viewsets.ModelViewSet):
             except MedicineItem.DoesNotExist:
                 return Response({'error': 'Medicine not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-            _apply_medicine_stock_delta(med, qty, tx_type, note)
+            _apply_medicine_stock_delta(
+                med,
+                qty,
+                tx_type,
+                note,
+                expiration_date=exp_date or None,
+                batch_number=batch_no or None,
+            )
 
         try:
             from .gdrive_service import schedule_mirror
@@ -1436,6 +1572,8 @@ class PurchaseRequestViewSet(viewsets.ModelViewSet):
         raw_date = (request.data.get('date') or '').strip()
         rx_date = raw_date or timezone.localdate().isoformat()
         note = (request.data.get('note') or '').strip()
+        exp_date = _format_exp_display(request.data.get('expirationDate') or request.data.get('expiration_date') or '')
+        batch_no = (request.data.get('batchNumber') or request.data.get('batch_number') or '').strip()
 
         med_updated = None
         with transaction.atomic():
@@ -1447,22 +1585,38 @@ class PurchaseRequestViewSet(viewsets.ModelViewSet):
             if pr.status == 'Voided':
                 return Response({'error': 'Cannot receive stock for a voided purchase request.'}, status=status.HTTP_400_BAD_REQUEST)
 
+            effective_batch = batch_no or pr.prfNo or f"BATCH-{rx_date.replace('-', '')}"
             pr.receivedQty = (pr.receivedQty or 0) + qty
             pr.status = 'Complete' if pr.receivedQty >= (pr.requestedQty or 0) else 'Partial'
             pr.save()
+
+            history_note = note or f'Received delivery (+{qty} units)'
+            if exp_date and 'Exp:' not in history_note:
+                history_note = f"{history_note} • Batch: {effective_batch} | Exp: {exp_date}"
 
             PurchaseHistory.objects.create(
                 request=pr,
                 date=rx_date,
                 qty=qty,
-                note=note or f'Received delivery (+{qty} units)',
+                note=history_note,
+                batchNumber=effective_batch,
+                expirationDate=exp_date or None,
             )
 
             med_name = (pr.medicine or '').strip()
             if med_name:
                 med = MedicineItem.objects.select_for_update().filter(name__iexact=med_name).first()
                 if med:
-                    _apply_medicine_stock_delta(med, qty, 'add', f'From PR {pr.prfNo or pr.id}')
+                    _apply_medicine_stock_delta(
+                        med,
+                        qty,
+                        'add',
+                        f'From PR {pr.prfNo or pr.id}',
+                        expiration_date=exp_date or None,
+                        batch_number=effective_batch,
+                        prf_no=pr.prfNo,
+                        rx_date=rx_date,
+                    )
                     med_updated = med
 
         if med_updated is not None:

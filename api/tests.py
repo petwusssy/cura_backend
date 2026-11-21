@@ -392,7 +392,11 @@ class PrivacySecurityTests(unittest.TestCase):
             message='New medcert request',
             patientName='JUAN',
         )
-        clear_req = factory.post('/api/notifications/clear_all/?audience=web')
+        clear_req = factory.post(
+            '/api/notifications/clear_all/?audience=web',
+            {'staff_name': 'NURSE TEST', 'staff_role': 'Nurse'},
+            format='json',
+        )
         force_authenticate(clear_req, user=staff_user)
         clear_view = AppNotificationViewSet.as_view({'post': 'clear_all'})
         clear_resp = clear_view(clear_req)
@@ -400,6 +404,12 @@ class PrivacySecurityTests(unittest.TestCase):
         self.assertFalse(AppNotification.objects.filter(pk=web_notif_2.id).exists())
         self.assertTrue(AppNotification.objects.filter(pk=patient_turn.id).exists())
         self.assertTrue(AppNotification.objects.filter(pk=patient_update.id).exists())
+
+        from api.models import AuditLog
+        clear_audit = AuditLog.objects.filter(action='CLEAR_NOTIFICATIONS', staff_name_snapshot='NURSE TEST').order_by('-timestamp').first()
+        self.assertIsNotNone(clear_audit)
+        self.assertIn('Cleared 1 notification(s)', clear_audit.details)
+        clear_audit.delete()
         patient_turn.delete()
         patient_update.delete()
 

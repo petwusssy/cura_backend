@@ -1817,6 +1817,20 @@ class AppNotificationViewSet(viewsets.ModelViewSet):
         audience = request.query_params.get('audience') or request.query_params.get('target') or request.data.get('audience')
         qs = self._scope_for_audience(AppNotification.objects.all(), audience, request)
         deleted_count, _ = qs.delete()
+        if deleted_count > 0 and is_staff_account(getattr(request, 'user', None)):
+            staff_id = request.data.get('staff_id') or None
+            staff_name = str(request.data.get('staff_name') or getattr(request.user, 'username', '') or 'CLINIC STAFF').strip()
+            staff_role = str(request.data.get('staff_role') or 'Clinic Staff').strip()
+            staff_obj = ClinicStaff.objects.filter(pk=staff_id).first() if staff_id else None
+            AuditLog.objects.create(
+                staff=staff_obj,
+                staff_name_snapshot=(staff_obj.name if staff_obj else staff_name)[:150],
+                staff_role_snapshot=(staff_obj.role if staff_obj else staff_role)[:100],
+                action='CLEAR_NOTIFICATIONS',
+                target_type='AppNotification',
+                target_id=str(audience or 'web')[:120],
+                details=f"Cleared {deleted_count} notification(s) ({audience or 'web'})",
+            )
         return Response({'status': 'all notifications cleared', 'deleted': deleted_count})
 
 from .models import TelemedicineRequest, TelemedicineAvailability, AppointmentAvailability

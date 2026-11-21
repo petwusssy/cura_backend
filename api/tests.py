@@ -197,6 +197,59 @@ class DriveOAuthTests(unittest.TestCase):
         self.assertEqual(captured['payload']['date'], '2026-11-15')
         self.assertEqual(captured['payload']['timestamp'], '2026-11-15 07:45:12 AM')
 
+    def test_mirrors_match_web_report_rules_and_include_weekly_census(self):
+        from datetime import date as py_date
+        self.assertIn('weekly_census', gs._MIRRORS)
+        self.assertTrue(gs._is_case_match('Headache', 'Severe headache and vomiting'))
+        self.assertTrue(gs._is_case_match('Vomiting', 'Severe headache and vomiting'))
+        self.assertTrue(gs._is_case_match('Hypertension', 'Elevated BP / high blood'))
+        self.assertFalse(gs._is_case_match('Fever', 'High fever and chills'))
+
+        fake_stu = MagicMock(category='Student', studentCategory='College', course='BSN 1A', section='BSN 1A', gradeLevel='')
+        fake_emp = MagicMock(category='Employee', studentCategory='', course='IT', section='', gradeLevel='')
+        fake_cons = [
+            MagicMock(
+                id='c1', patient_id='S1', patient=fake_stu, date=py_date(2026, 11, 10),
+                timeIn='09:00', status='Consultation', complaint='Severe headache and fever',
+                categories=['Headache/Dizziness'], earlyDismissal=False, dismissalDestination='',
+                transferred=False, purposeOfVisit='', treatments=MagicMock(all=lambda: []),
+            ),
+            MagicMock(
+                id='c2', patient_id='E1', patient=fake_emp, date=py_date(2026, 11, 18),
+                timeIn='10:00', status='Consultation', complaint='Fever',
+                categories=['Fever', 'Custom New Case'], earlyDismissal=False, dismissalDestination='',
+                transferred=False, purposeOfVisit='', treatments=MagicMock(all=lambda: []),
+            ),
+        ]
+        upserted = {}
+        def capture_upsert(folder_id, filename, headers, rows, lock):
+            upserted[filename] = (headers, rows)
+
+        with patch('api.gdrive_service._dedup_month_consultations', return_value=fake_cons), \
+             patch('api.gdrive_service._upsert_drive_csv', side_effect=capture_upsert):
+            gs._mirror_cases_attended(2026, 11)
+            gs._mirror_weekly_census(2026, 11)
+
+        c_headers, c_rows = upserted['Cases_Attended_2026-11.csv']
+        self.assertEqual(c_headers, ['CASES/COMPLAINS', 'STUDENT', 'PERSONNEL', 'TOTAL'])
+        by_case = {r[0]: r for r in c_rows}
+        # Student matched Headache + Dizziness via categories/complaint, NOT Fever (Fever requires explicit category)
+        self.assertEqual(by_case['Headache'], ['Headache', 1, '', 1])
+        self.assertEqual(by_case['Dizziness'], ['Dizziness', 1, '', 1])
+        # Employee had explicit 'Fever' category + extra 'Custom New Case'
+        self.assertEqual(by_case['Fever'], ['Fever', '', 1, 1])
+        self.assertEqual(by_case['Custom New Case'], ['Custom New Case', '', 1, 1])
+        self.assertEqual(by_case['TOTAL CASES ATTENDED'], ['TOTAL CASES ATTENDED', 2, 2, 4])
+
+        w_headers, w_rows = upserted['Weekly_Census_2026-11.csv']
+        self.assertEqual(w_headers[0], 'SHEET_GROUP')
+        bsn_row = next(r for r in w_rows if r[1] == 'BSN 1A')
+        self.assertEqual(bsn_row[0], 'BSN, BSP')
+        self.assertEqual(bsn_row[-1], 1)
+        tot_row = w_rows[-1]
+        self.assertEqual(tot_row[0], 'TOTAL')
+        self.assertEqual(tot_row[-1], 1)
+
 
 class PrivacySecurityTests(unittest.TestCase):
     @classmethod

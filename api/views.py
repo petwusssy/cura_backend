@@ -2644,7 +2644,16 @@ class ReportArchiveView(APIView):
     permission_classes = [IsClinicStaff]
 
     def get(self, request):
-        from .gdrive_service import list_drive_archives
+        from .gdrive_service import list_drive_archives, sync_all_report_mirrors, sync_month_report_mirrors
+        refresh = str(request.query_params.get('refresh') or '').strip() in ('1', 'true', 'yes')
+        yr_raw = str(request.query_params.get('year') or '').strip()
+        mo_raw = str(request.query_params.get('month') or '').strip()
+        if refresh:
+            sync_all_report_mirrors()
+        if yr_raw.isdigit() and mo_raw.isdigit():
+            yr, mo = int(yr_raw), int(mo_raw)
+            if 2000 <= yr <= 2100 and 1 <= mo <= 12 and refresh:
+                sync_month_report_mirrors(yr, mo)
         return Response({'archives': list_drive_archives()}, status=status.HTTP_200_OK)
 
     def post(self, request):
